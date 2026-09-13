@@ -1,0 +1,483 @@
+diff --git a/backend/xerox_mfp-tcp.c b/backend/xerox_mfp-tcp.c
+index 845ab7e..b80dd4f 100644
+--- a/backend/xerox_mfp-tcp.c
++++ b/backend/xerox_mfp-tcp.c
+@@ -47,49 +47,15 @@
+ #define	RECV_TIMEOUT	1	/*	seconds		*/
+ extern int sanei_debug_xerox_mfp;
+ 
+-int	tcp_dev_request(struct device *dev,
+-                    SANE_Byte *cmd, size_t cmdlen,
++#include "xerox_tcp_io.h"
++
++int tcp_dev_request(struct device *dev, SANE_Byte *cmd, size_t cmdlen,
+                     SANE_Byte *resp, size_t *resplen)
+ {
+-    size_t	bytes_recv = 0;
+-    ssize_t	rc = 1;
+-    size_t	len;
+-
+-
+-    /* Send request, if any */
+-    if (cmd && cmdlen) {
+-        len = (size_t)sanei_tcp_write(dev->dn, cmd, cmdlen);
+-        if (len != cmdlen) {
+-            DBG(1, "%s: sent only %lu bytes of %lu\n",
+-                __func__, (u_long)len, (u_long)cmdlen);
+-            return SANE_STATUS_IO_ERROR;
+-        }
++    if (xm_request(dev->dn, cmd, cmdlen, resp, resplen, 15000)) {
++        DBG(1, "%s: incomplete or invalid TCP frame: %s\n", __func__, strerror(errno));
++        return SANE_STATUS_IO_ERROR;
+     }
+-
+-    /* Receive response, if expected */
+-    if (resp && resplen) {
+-        DBG(3, "%s: wait for %i bytes\n", __func__, (int)*resplen);
+-
+-        while (bytes_recv < *resplen && rc > 0) {
+-            rc = recv(dev->dn, resp+bytes_recv, *resplen-bytes_recv, 0);
+-
+-            if (rc > 0)	bytes_recv += rc;
+-            else {
+-                DBG(1, "%s: error %s, bytes requested: %i, bytes read: %i\n",
+-                    __func__, strerror(errno), (int)*resplen, (int)bytes_recv);
+-                *resplen = bytes_recv;
+-                /*
+-                    TODO:
+-                	do something smarter than that!
+-                */
+-                return SANE_STATUS_GOOD;
+-                return SANE_STATUS_IO_ERROR;
+-            }
+-        }
+-    }
+-
+-    *resplen = bytes_recv;
+-
+     return SANE_STATUS_GOOD;
+ }
+ 
+@@ -134,6 +100,10 @@ SANE_Status	tcp_dev_open(struct device *dev)
+ 
+     status = sanei_tcp_open(strhost, port, &dev->dn);
+     if (status == SANE_STATUS_GOOD) {
++#ifdef SO_NOSIGPIPE
++        int no_sigpipe = 1;
++        setsockopt(dev->dn, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
++#endif
+         tv.tv_sec  = RECV_TIMEOUT;
+         tv.tv_usec = 0;
+         if (setsockopt(dev->dn, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof tv) < 0) {
+diff --git a/backend/xerox_mfp.c b/backend/xerox_mfp.c
+index 7e85954..873c644 100644
+--- a/backend/xerox_mfp.c
++++ b/backend/xerox_mfp.c
+@@ -23,6 +23,8 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <math.h>
++#include <stdint.h>
++#include <time.h>
+ #include <unistd.h>
+ #include <sys/time.h>
+ #include <sys/types.h>
+@@ -35,6 +37,7 @@
+ #include "../include/sane/sanei_backend.h"
+ #ifdef HAVE_LIBJPEG
+ #include <jpeglib.h>
++#include <setjmp.h>
+ #endif
+ #include "xerox_mfp.h"
+ 
+@@ -93,63 +96,56 @@ static char *str_cmd(int cmd)
+ }
+ 
+ #define MAX_DUMP 70
+-const char *encTmpFileName = "/tmp/stmp_enc.tmp";
++#ifdef HAVE_LIBJPEG
++struct xm_jpeg_error { struct jpeg_error_mgr base; jmp_buf jump; };
++static void xm_jpeg_failed(j_common_ptr cinfo) {
++    struct xm_jpeg_error *err = (struct xm_jpeg_error *)cinfo->err;
++    longjmp(err->jump, 1);
++}
++#endif
+ 
+ /*
+  * Decode jpeg from `infilename` into dev->decData of dev->decDataSize size.
+  */
+-static int decompress(struct device __sane_unused__ *dev,
+-                      const char __sane_unused__ *infilename)
++static int decompress(struct device __sane_unused__ *dev)
+ {
+ #ifdef HAVE_LIBJPEG
+-    int rc;
+-    int row_stride, width, height, pixel_size;
+-    struct jpeg_decompress_struct cinfo;
+-    struct jpeg_error_mgr jerr;
+-    unsigned long bmp_size = 0;
+-    FILE *pInfile = NULL;
+-    JSAMPARRAY buffer;
+-
+-    if ((pInfile = fopen(infilename, "rb")) == NULL) {
+-        fprintf(stderr, "can't open %s\n", infilename);
++    struct jpeg_decompress_struct cinfo = {0};
++    struct xm_jpeg_error jerr;
++    size_t row_stride, size;
++    dev->decDataSize = 0;
++    dev->currentDecDataIndex = 0;
++    if (!dev->jpeg_file) return -1;
++    rewind(dev->jpeg_file);
++    cinfo.err = jpeg_std_error(&jerr.base);
++    jerr.base.error_exit = xm_jpeg_failed;
++    if (setjmp(jerr.jump)) {
++        jpeg_destroy_decompress(&cinfo);
+         return -1;
+     }
+-
+-    cinfo.err = jpeg_std_error(&jerr);
+-
+     jpeg_create_decompress(&cinfo);
+-
+-    jpeg_stdio_src(&cinfo, pInfile);
+-
+-    rc = jpeg_read_header(&cinfo, TRUE);
+-    if (rc != 1) {
++    jpeg_stdio_src(&cinfo, dev->jpeg_file);
++    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+         jpeg_destroy_decompress(&cinfo);
+-        fclose(pInfile);
+         return -1;
+     }
+-
++    cinfo.out_color_space = JCS_RGB;
+     jpeg_start_decompress(&cinfo);
+-
+-    width = cinfo.output_width;
+-    height = cinfo.output_height;
+-    pixel_size = cinfo.output_components;
+-    bmp_size = width * height * pixel_size;
+-    assert(bmp_size <= POST_DATASIZE);
+-    dev->decDataSize = bmp_size;
+-
+-    row_stride = width * pixel_size;
+-
+-    buffer = (*cinfo.mem->alloc_sarray)
+-             ((j_common_ptr) &cinfo, JPOOL_IMAGE, row_stride, 1);
+-
++    row_stride = (size_t)cinfo.output_width * cinfo.output_components;
++    if (cinfo.output_components != 3 || !row_stride ||
++        cinfo.output_width != (unsigned)dev->para.pixels_per_line ||
++        cinfo.output_height > POST_DATASIZE / row_stride) {
++        jpeg_destroy_decompress(&cinfo);
++        return -1;
++    }
++    size = row_stride * cinfo.output_height;
+     while (cinfo.output_scanline < cinfo.output_height) {
+-        buffer[0] = dev->decData + \
+-                    (cinfo.output_scanline) * row_stride;
+-        jpeg_read_scanlines(&cinfo, buffer, 1);
++        JSAMPROW row = dev->decData + cinfo.output_scanline * row_stride;
++        jpeg_read_scanlines(&cinfo, &row, 1);
+     }
+     jpeg_finish_decompress(&cinfo);
+     jpeg_destroy_decompress(&cinfo);
+-    fclose(pInfile);
++    dev->decDataSize = (int)size;
+     return 0;
+ #else
+     return -1;
+@@ -167,6 +163,15 @@ static int copy_decompress_data(struct device *dev, unsigned char *pDest, int ma
+     if (!dev->decDataSize)
+         return 0;
+     data_size = dev->decDataSize - dev->currentDecDataIndex;
++    /* Firmware JPEG blocks may include bottom padding. Never deliver pixels
++     * outside the negotiated scan region or fill that padding as blank rows. */
++    int remaining = dev->total_img_size - dev->total_out_size;
++    if (remaining <= 0) {
++        dev->decDataSize = 0;
++        dev->currentDecDataIndex = 0;
++        return 0;
++    }
++    if (data_size > remaining) data_size = remaining;
+     if (data_size > maxlen)
+         data_size = maxlen;
+     if (data_size && pDest) {
+@@ -184,23 +189,19 @@ static int copy_decompress_data(struct device *dev, unsigned char *pDest, int ma
+ 
+ static int decompress_tempfile(struct device *dev)
+ {
+-    decompress(dev, encTmpFileName);
+-    remove(encTmpFileName);
+-    return 0;
++    int result = decompress(dev);
++    if (!dev->jpeg_file) return -1;
++    rewind(dev->jpeg_file);
++    if (ftruncate(fileno(dev->jpeg_file), 0)) result = -1;
++    return result;
+ }
+ 
+ static int dump_to_tmp_file(struct device *dev)
+ {
+-    unsigned char *pSrc = dev->data;
+     int srcLen = dev->datalen;
+-    FILE *pInfile;
+-    if ((pInfile = fopen(encTmpFileName, "a")) == NULL) {
+-        fprintf(stderr, "can't open %s\n", encTmpFileName);
+-        return 0;
+-    }
+-
+-    fwrite(pSrc, 1, srcLen, pInfile);
+-    fclose(pInfile);
++    if (!dev->jpeg_file ||
++        fwrite(dev->data, 1, srcLen, dev->jpeg_file) != (size_t)srcLen)
++        return -1;
+     return srcLen;
+ }
+ 
+@@ -358,6 +359,7 @@ static SANE_Status dev_stop(struct device *dev)
+     DBG(3, "%s: %p, scanning %d, reserved %d\n", __func__,
+         (void *)dev, dev->scanning, dev->reserved);
+     dev->scanning = 0;
++    if (dev->jpeg_file) { fclose(dev->jpeg_file); dev->jpeg_file = NULL; }
+ 
+     /* release */
+     if (!dev->reserved)
+@@ -374,13 +376,19 @@ static SANE_Status dev_stop(struct device *dev)
+     return state;
+ }
+ 
++/* Never abort another client's scan while waiting for our own reservation.
++ * Cleanup replies must not replace the error which caused the cleanup. */
++static SANE_Status dev_abort_owned(struct device *dev, SANE_Status status)
++{
++    if (dev->reserved)
++        dev_cmd(dev, CMD_ABORT);
++    dev->state = status;
++    return dev_stop(dev);
++}
++
+ SANE_Status ret_cancel(struct device *dev, SANE_Status ret)
+ {
+-    dev_cmd(dev, CMD_ABORT);
+-    if (dev->scanning) {
+-        dev_stop(dev);
+-        dev->state = SANE_STATUS_CANCELLED;
+-    }
++    dev_abort_owned(dev, SANE_STATUS_CANCELLED);
+     return ret;
+ }
+ 
+@@ -391,15 +399,39 @@ static int cancelled(struct device *dev)
+     return 0;
+ }
+ 
++static int64_t monotonic_ms(void)
++{
++    struct timespec now;
++    if (clock_gettime(CLOCK_MONOTONIC, &now))
++        return -1;
++    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++
+ /* issue command and wait until scanner is not busy */
+ /* return 0 on error/blocking, 1 is ok and ready */
+ static int dev_cmd_wait(struct device *dev, int cmd)
+ {
+     int sleeptime = 10;
++    int64_t now = monotonic_ms();
++    if (now < 0) {
++        dev_abort_owned(dev, SANE_STATUS_IO_ERROR);
++        return 0;
++    }
++    /* A responsive device can return BUSY forever (observed for a small
++     * WorkCentre 3025 crop). Bound retries independently for each command.
++     * Transport I/O and the two cleanup commands have their own deadlines. */
++    const int64_t deadline = now + 60000;
+ 
+     do {
+         if (cancelled(dev))
+             return 0;
++        now = monotonic_ms();
++        if (now < 0 || now >= deadline) {
++            DBG(1, "%s(%s): %s\n", __func__, str_cmd(cmd),
++                now < 0 ? "monotonic clock failed" : "BUSY deadline expired");
++            dev_abort_owned(dev, now < 0 ? SANE_STATUS_IO_ERROR : SANE_STATUS_DEVICE_BUSY);
++            return 0;
++        }
+         if (!dev_cmd(dev, cmd)) {
+             dev->state = SANE_STATUS_IO_ERROR;
+             return 0;
+@@ -411,11 +443,18 @@ static int dev_cmd_wait(struct device *dev, int cmd)
+                     dev->state = SANE_STATUS_GOOD;
+                     return 0;
+                 } else {
++                    int wait_ms;
++                    now = monotonic_ms();
++                    if (now < 0 || now >= deadline) {
++                        dev_abort_owned(dev, now < 0 ? SANE_STATUS_IO_ERROR : SANE_STATUS_DEVICE_BUSY);
++                        return 0;
++                    }
+                     if (sleeptime > 1000)
+                         sleeptime = 1000;
++                    wait_ms = MIN(sleeptime, deadline - now);
+                     DBG(4, "(%s) sleeping(%d ms).. [%x %x]\n",
+-                        str_cmd(cmd), sleeptime, dev->res[4], dev->res[5]);
+-                    usleep(sleeptime * 1000);
++                        str_cmd(cmd), wait_ms, dev->res[4], dev->res[5]);
++                    usleep(wait_ms * 1000);
+                     if (sleeptime < 1000)
+                         sleeptime *= (sleeptime < 100)? 10 : 2;
+                 }
+@@ -503,6 +542,8 @@ static SANE_String_Const doc_sources[] = {
+     "Flatbed", "ADF", "Auto", NULL
+ };
+ 
++static SANE_String_Const flatbed_only_sources[] = { "Flatbed", NULL };
++
+ static int doc_source_to_code[] = {
+     DOC_FLATBED, DOC_ADF, DOC_AUTO
+ };
+@@ -603,7 +644,7 @@ static void init_options(struct device *dev)
+     dev->opt[OPT_SOURCE].size = max_string_size(doc_sources);
+     dev->opt[OPT_SOURCE].cap = SANE_CAP_SOFT_SELECT|SANE_CAP_SOFT_DETECT;
+     dev->opt[OPT_SOURCE].constraint_type = SANE_CONSTRAINT_STRING_LIST;
+-    dev->opt[OPT_SOURCE].constraint.string_list = doc_sources;
++    dev->opt[OPT_SOURCE].constraint.string_list = dev->has_adf ? doc_sources : flatbed_only_sources;
+ 
+     dev->opt[OPT_JPEG].name = "jpeg";
+     dev->opt[OPT_JPEG].title = SANE_I18N("jpeg compression");
+@@ -682,6 +723,14 @@ static void set_parameters(struct device *dev)
+ #endif
+     }
+     dev->para.lines = dev->win_len / px_to_len;
++    /* This model uses the stated 1200-point window coordinates. The legacy
++     * 1180/1213.9 correction padded a 297 mm JPEG page to 301.9 mm in testing. */
++    if (!strcmp(dev->sane.model, "WorkCentre 3025")) {
++        px_to_len = 1200.0 / dev->val[OPT_RESOLUTION].w;
++        dev->para.pixels_per_line = dev->win_width / px_to_len;
++        dev->para.bytes_per_line = dev->para.pixels_per_line;
++        dev->para.lines = dev->win_len / px_to_len;
++    }
+     if (dev->composition == MODE_LINEART ||
+         dev->composition == MODE_HALFTONE) {
+         dev->para.format = SANE_FRAME_GRAY;
+@@ -1004,6 +1053,7 @@ dev_free(struct device *dev)
+         free(UNCONST(dev->sane.model));
+     if (dev->sane.type)
+         free(UNCONST(dev->sane.type));
++    if (dev->jpeg_file) fclose(dev->jpeg_file);
+     if (dev->data)
+         free(dev->data);
+     if (dev->decData) {
+@@ -1166,6 +1216,9 @@ sane_close(SANE_Handle h)
+         return;
+ 
+     DBG(3, "%s: %p (%s)\n", __func__, (void *)dev, dev->sane.name);
++    /* Cancel may be followed by close without another sane_read call. */
++    if (dev->reserved) dev_cmd(dev, CMD_ABORT);
++    dev_stop(dev);
+     dev->io->dev_close(dev);
+ }
+ 
+@@ -1364,7 +1417,12 @@ sane_read(SANE_Handle h, SANE_Byte *buf, SANE_Int maxlen, SANE_Int *lenp)
+         } else if (dev->composition != MODE_RGB24) {
+             int diff = dev->total_img_size - dev->total_out_size;
+             int bufLen = (diff < maxlen) ? diff : maxlen;
+-            if (diff > 0 && copy_plain_trim(dev, buf, bufLen, lenp) > 0) {
++            int consumed = diff > 0 ? copy_plain_trim(dev, buf, bufLen, lenp) : 0;
++            if (consumed > 0) {
++                /* Advance the ring buffer as in the normal read path. Without
++                 * this, a final band replays its first row on each call. */
++                dev->datalen -= consumed;
++                dev->dataoff = (dev->dataoff + consumed) & DATAMASK;
+                 dev->total_out_size += *lenp;
+                 return SANE_STATUS_GOOD;
+             }
+@@ -1387,7 +1445,7 @@ sane_read(SANE_Handle h, SANE_Byte *buf, SANE_Int maxlen, SANE_Int *lenp)
+             }
+             if (isJPEGEnabled(dev) &&
+                 dev->composition == MODE_RGB24) {
+-                remove(encTmpFileName);
++                if (dev->jpeg_file) { fclose(dev->jpeg_file); dev->jpeg_file = NULL; }
+             }
+             /* that's all */
+             /* finished receving the document; */
+@@ -1449,9 +1507,10 @@ sane_read(SANE_Handle h, SANE_Byte *buf, SANE_Int maxlen, SANE_Int *lenp)
+             if (dev->para.format == SANE_FRAME_RGB && dev->line_order) {
+                 if (isJPEGEnabled(dev)) {
+                     clrlen = dump_to_tmp_file(dev);
++                    if (clrlen < 0) return ret_cancel(dev, SANE_STATUS_IO_ERROR);
+                     /* decompress after reading entire block data*/
+                     if (0 == dev->blocklen) {
+-                        decompress_tempfile(dev);
++                        if (decompress_tempfile(dev)) return ret_cancel(dev, SANE_STATUS_IO_ERROR);
+                     }
+                     copy_decompress_data(dev, buf, maxlen, &olen);
+                 } else {
+@@ -1505,6 +1564,9 @@ sane_start(SANE_Handle h)
+     dev->total_out_size = 0;
+     dev->total_data_size = 0;
+     dev->blocks = 0;
++    /* Do not carry decoded JPEG padding into the next acquisition. */
++    dev->decDataSize = 0;
++    dev->currentDecDataIndex = 0;
+ 
+     if (!dev->reserved) {
+         if (dev->has_adf
+@@ -1555,7 +1617,8 @@ sane_start(SANE_Handle h)
+     else if (dev->composition == MODE_LINEART ||
+              dev->composition == MODE_HALFTONE) {
+         dev->para.bytes_per_line = (dev->para.pixels_per_line + 7) / 8;
+-        dev->para.pixels_per_line = dev->para.bytes_per_line * 8;
++        if (strcmp(dev->sane.model, "WorkCentre 3025"))
++            dev->para.pixels_per_line = dev->para.bytes_per_line * 8;
+     } else {
+         dev->para.bytes_per_line = dev->para.pixels_per_line;
+     }
+@@ -1564,18 +1627,13 @@ sane_start(SANE_Handle h)
+ 
+     if (isJPEGEnabled(dev) &&
+         dev->composition == MODE_RGB24) {
+-	int fd;
+-        remove(encTmpFileName);
+-
+-	/* Precreate temporary file in exclusive mode. */
+-	fd = open(encTmpFileName, O_CREAT|O_EXCL, 0600);
+-	if (fd == -1) {
+-	    DBG(3, "%s: %p, can't create temporary file %s: %s\n", __func__,
+-		(void *)dev, encTmpFileName, strerror(errno));
+-	    return ret_cancel(dev, SANE_STATUS_ACCESS_DENIED);
+-	}
+-	close(fd);
++        if (dev->jpeg_file) fclose(dev->jpeg_file);
++        /* tmpfile creates a private, unlinked temporary file. Closing on
++         * completion/cancel releases it; no globally named scan contents. */
++        dev->jpeg_file = tmpfile();
++        if (!dev->jpeg_file) return ret_cancel(dev, SANE_STATUS_ACCESS_DENIED);
+     }
++
+     dev->currentDecDataIndex = 0;
+ 
+     return SANE_STATUS_GOOD;
+diff --git a/backend/xerox_mfp.h b/backend/xerox_mfp.h
+index ebd1b56..7546076 100644
+--- a/backend/xerox_mfp.h
++++ b/backend/xerox_mfp.h
+@@ -49,6 +49,8 @@ enum options {
+ 
+ typedef struct transport transport;
+ 
++#include <stdio.h>
++
+ struct device {
+     struct device *next;
+     SANE_Device sane;
+@@ -80,6 +82,7 @@ struct device {
+     SANE_Byte *decData;		/* static buffer of POST_DATASIZE bytes */
+     int decDataSize;
+     int currentDecDataIndex;
++    FILE *jpeg_file;
+     /* data from CMD_INQUIRY: */
+     int resolutions;		/* supported resolution bitmask */
+     int compositions;		/* supported image compositions bitmask */

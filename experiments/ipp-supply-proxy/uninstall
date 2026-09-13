@@ -1,0 +1,19 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+set -eu
+umask 077
+proxy_package="$(cd "$(dirname "$0")" && pwd -P)"
+proxy_python=''
+proxy_saved=''
+# Keep the array nonempty: macOS Bash 3.2 rejects an empty array with set -u.
+proxy_args=(uninstall)
+while (( $# )); do
+  case "$1" in
+    --python) [[ $# -ge 2 ]] || exit 64; proxy_python="$2"; shift 2 ;;
+    *) proxy_args+=("$1"); shift ;;
+  esac
+done
+(cd "$proxy_package/maintenance" && /usr/bin/shasum -a 256 -c "$proxy_package/maintenance.sha256")
+[[ ! -f "$proxy_package/python-path" ]] || proxy_saved="$(cat "$proxy_package/python-path")"
+proxy_python="$(/bin/bash "$proxy_package/maintenance/select-python" "$proxy_python" "$proxy_saved")"
+exec "$proxy_python" -I "$proxy_package/maintenance/proxy-maintenance.py" "${proxy_args[@]}"

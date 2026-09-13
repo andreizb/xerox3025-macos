@@ -1,0 +1,22 @@
+{
+  "github.com/OpenPrinting/goipp/.gitignore": "01af3a6d010d4c45fa58a8345f478c731f8205eb50b3aacded51c60d17519cad",
+  "github.com/OpenPrinting/goipp/LICENSE": "744244cc574688a0017c85d81b2555b1af768601f242f079fac4f7570c822e47",
+  "github.com/OpenPrinting/goipp/Makefile": "4afb4cabb287a64f45ac886330594ec63bdb7bf361972067ebb4f45492a02a53",
+  "github.com/OpenPrinting/goipp/README.md": "3af37d59ebd73d183a784ae9330f8fcffeac21a92db1a4d2e29b84d197fe942c",
+  "github.com/OpenPrinting/goipp/_config.yml": "c2079b4165851ecdb83775c441b2c11cd1b13ffa04fbdeb5c8a373b859e27c2b",
+  "github.com/OpenPrinting/goipp/attr.go": "fe542a2f5b60bda19c9c70afa8c325d83b5ec43782187d28287755798bcbcfd7",
+  "github.com/OpenPrinting/goipp/const.go": "d84c4c71ac8db95c0ba02e2a9095b749c921e8745df5211a60a025f81616f5a9",
+  "github.com/OpenPrinting/goipp/decoder.go": "90131392551f6b0da2989afe6e3652ddf068d9ddc5b9139ec32210c7f76cc56e",
+  "github.com/OpenPrinting/goipp/doc.go": "8cbcf89b6a202be8c4ced2755d3a5104db2a42ce16d9dd3d2dd3c48e1572cb30",
+  "github.com/OpenPrinting/goipp/encoder.go": "21760f0d882375b5733b2ada9f0d3e3e4357cdd3ec0061c38e8e15f16f6551ff",
+  "github.com/OpenPrinting/goipp/formatter.go": "f30b4eafc4f5e23a41866a5dbfd2aecf6309392ffbe6e3bc5e85b93949cbdd6b",
+  "github.com/OpenPrinting/goipp/group.go": "a3a9532415697a555d1a2e41d5473387e8e45930518353134b1a50dd817f714b",
+  "github.com/OpenPrinting/goipp/index.md": "19e30ee5d6e0306e55ea7434e4033582cb873274daa8791962a003de907d922f",
+  "github.com/OpenPrinting/goipp/message.go": "f6f867dab87099d71ec448ae7a9e881c6aa361089c0da5c15d276136cdbb23ed",
+  "github.com/OpenPrinting/goipp/op.go": "0fa66e55a1185173d9135867ac5df64cc89feb42964d122e485f9f4ce2422614",
+  "github.com/OpenPrinting/goipp/status.go": "a922c3b6ef834a3785b8ea952bd03319388e485ea5fac756a127a3984e2df930",
+  "github.com/OpenPrinting/goipp/tag.go": "2321ef5ef69ce61539769deba171035a38971ba568f5c32e787091472c4d7864",
+  "github.com/OpenPrinting/goipp/type.go": "c2bc3743d86b4c7e3437e0a1a1b0ab109cae85d020489338e004ba4c60eabc37",
+  "github.com/OpenPrinting/goipp/value.go": "ca00f8395f05ed513803d62e95d9b407fde8dd152ef4645b85f92707fe17f4ae",
+  "modules.txt": "29ccf3065e2edc73117dcbf4b2603c8e7421901c828d776d44308f4f8f50379f"
+}

@@ -1,0 +1,17 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Remove the optional printing route before restoring the scanner association.
+set -eu
+if (( $# )); then printf 'usage: uninstall-all\n' >&2; exit 64; fi
+remove_library="$HOME/Library/Application Support"
+for remove_component in Xerox3025SupplyProxy Xerox3025Bridge; do
+  remove_root="$remove_library/$remove_component"
+  if [[ -e "$remove_root" || -L "$remove_root" ]]; then
+    [[ ! -L "$remove_root" && -f "$remove_root/uninstall" && ! -L "$remove_root/uninstall" ]] || {
+      printf 'No owned uninstaller available at %s; nothing further removed.\n' "$remove_root" >&2
+      exit 73
+    }
+    /bin/bash "$remove_root/uninstall"
+  fi
+done
+printf 'Xerox background components removed. Printer queues and scanned documents retained.\n'

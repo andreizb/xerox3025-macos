@@ -1,0 +1,47 @@
+{
+  "autoconf": {
+    "url": "https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz",
+    "sha256": "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a",
+    "directory": "autoconf-2.72"
+  },
+  "m4": {
+    "url": "https://ftp.gnu.org/gnu/m4/m4-1.4.20.tar.xz",
+    "sha256": "e236ea3a1ccf5f6c270b1c4bb60726f371fa49459a8eaaebc90b216b328daf2b",
+    "directory": "m4-1.4.20"
+  },
+  "automake": {
+    "url": "https://ftp.gnu.org/gnu/automake/automake-1.18.1.tar.xz",
+    "sha256": "168aa363278351b89af56684448f525a5bce5079d0b6842bd910fdd3f1646887",
+    "directory": "automake-1.18.1"
+  },
+  "autoconf-archive": {
+    "url": "https://ftp.gnu.org/gnu/autoconf-archive/autoconf-archive-2024.10.16.tar.xz",
+    "sha256": "7bcd5d001916f3a50ed7436f4f700e3d2b1bade3ed803219c592d62502a57363",
+    "directory": "autoconf-archive-2024.10.16"
+  },
+  "libusb": {
+    "url": "https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2",
+    "sha256": "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf",
+    "directory": "libusb-1.0.30"
+  },
+  "libjpeg-turbo": {
+    "url": "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz",
+    "sha256": "6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e",
+    "directory": "libjpeg-turbo-3.2.0"
+  },
+  "libpng": {
+    "url": "https://download.sourceforge.net/libpng/libpng-1.6.58.tar.xz",
+    "sha256": "28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775",
+    "directory": "libpng-1.6.58"
+  },
+  "sane-backends": {
+    "url": "https://gitlab.com/sane-project/backends.git",
+    "commit": "923a04efe8c82ed38eedd5310b28e3ccf4c81e6e",
+    "directory": "sane-backends"
+  },
+  "AirSane": {
+    "url": "https://github.com/SimulPiscator/AirSane.git",
+    "commit": "129cc3bf7258251a0a694dee7741285b59d88f9f",
+    "directory": "AirSane"
+  }
+}

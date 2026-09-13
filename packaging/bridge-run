@@ -1,0 +1,74 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Background service only. Uses Apple's system shell and bundled ARM64 binaries.
+set -eu
+umask 077
+bridge_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+bridge_state="${1:?state directory required}"
+bridge_uuid="${2:?printer UUID required}"
+mkdir -p "$bridge_state/sane.d"
+export SANE_CONFIG_DIR="$bridge_state/sane.d"
+export LD_LIBRARY_PATH="$bridge_root/lib/sane"
+unset SANE_DEBUG_XEROX_MFP SANE_DEBUG_DLL DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES
+bridge_child=''
+bridge_timer=''
+bridge_stop() {
+  trap - TERM INT
+  if [[ -n "$bridge_timer" ]]; then
+    kill -TERM "$bridge_timer" 2>/dev/null || true
+    wait "$bridge_timer" 2>/dev/null || true
+    bridge_timer=''
+  fi
+  if [[ -n "$bridge_child" ]]; then
+    kill -TERM "$bridge_child" 2>/dev/null || true
+    bridge_deadline=$((SECONDS+30))
+    while kill -0 "$bridge_child" 2>/dev/null; do
+      if (( SECONDS >= bridge_deadline )); then
+        kill -KILL "$bridge_child" 2>/dev/null || true
+        break
+      fi
+      /bin/sleep 0.2
+    done
+    wait "$bridge_child" 2>/dev/null || true
+  fi
+  exit 0
+}
+trap bridge_stop TERM INT
+printf 'xerox_mfp\n' > "$SANE_CONFIG_DIR/dll.conf"
+while true; do
+  if ! "$bridge_root/bin/discover" "$bridge_uuid" --sane > "$SANE_CONFIG_DIR/xerox_mfp.conf.next" 2>/dev/null; then
+    rm -f "$SANE_CONFIG_DIR/xerox_mfp.conf.next"
+    sleep 15 & bridge_child=$!; wait "$bridge_child" || true; bridge_child=''
+    continue
+  fi
+  mv "$SANE_CONFIG_DIR/xerox_mfp.conf.next" "$SANE_CONFIG_DIR/xerox_mfp.conf"
+  # Keep only two bounded process logs. No SANE debugging or image dumps.
+  [[ ! -f "$bridge_state/service.log" ]] || mv -f "$bridge_state/service.log" "$bridge_state/service.previous.log"
+  "$bridge_root/bin/airsaned" --interface=lo0 --listen-port=18325 \
+    --web-interface=false --debug=false --disclose-version=false \
+    --options-file="$bridge_root/etc/options.conf" \
+    --access-file="$bridge_root/etc/access.conf" \
+    --ignore-list="$bridge_root/etc/ignore.conf" > "$bridge_state/service.log" 2>&1 &
+  bridge_child=$!
+  bridge_ticks=0
+  while kill -0 "$bridge_child" 2>/dev/null; do
+    sleep 5 & bridge_timer=$!; wait "$bridge_timer" || true
+    bridge_timer=''
+    bridge_ticks=$((bridge_ticks+1))
+    if (( bridge_ticks % 6 == 0 )); then
+      # If the printer was asleep during SANE enumeration, retry discovery.
+      # A present endpoint is never restarted merely because a scan is busy.
+      if ! /usr/bin/curl --noproxy '*' --fail --silent --max-time 3 \
+          http://127.0.0.1:18325/eSCL/ScannerCapabilities > /dev/null; then
+        kill -TERM "$bridge_child" 2>/dev/null || true
+      fi
+      if [[ -f "$bridge_state/service.log" ]] && (( $(/usr/bin/stat -f %z "$bridge_state/service.log") > 1048576 )); then
+        # Truncate metadata in place; the daemon retains the file descriptor.
+        : > "$bridge_state/service.log"
+      fi
+    fi
+  done
+  wait "$bridge_child" || true
+  bridge_child=''
+  sleep 5 & bridge_child=$!; wait "$bridge_child" || true; bridge_child=''
+done

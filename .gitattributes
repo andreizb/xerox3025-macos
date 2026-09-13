@@ -1,0 +1,4 @@
+# Unified patch context intentionally contains whitespace-only lines.
+*.patch -whitespace
+# Preserve the hash-verified upstream vendor source verbatim.
+experiments/ipp-supply-proxy/vendor/** -whitespace

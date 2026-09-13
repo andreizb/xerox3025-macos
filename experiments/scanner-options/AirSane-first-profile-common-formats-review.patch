@@ -1,0 +1,54 @@
+--- a/server/scanner.cpp
++++ b/server/scanner.cpp
+@@ -225,7 +225,7 @@
+   const char* init2(const OptionsFile&);
+   void generateStableUniqueName();
+   void writeScannerCapabilitiesXml(std::ostream&) const;
+-  void writeSettingProfile(int bits, std::ostream&) const;
++  void writeSettingProfile(int bits, std::ostream&, bool includeLineart = false) const;
+   std::shared_ptr<ScanJob> createJob();
+   bool isOpen() const;
+   const char* statusString() const;
+@@ -297,12 +297,12 @@
+ }
+ 
+ void
+-Scanner::Private::writeSettingProfile(int bits, std::ostream& os) const
++Scanner::Private::writeSettingProfile(int bits, std::ostream& os, bool includeLineart) const
+ {
+   os << "<scan:SettingProfile name='" << mCurrentProfile++
+      << "'>\r\n"
+         "<scan:ColorModes>\r\n";
+-  if (bits == 1)
++  if (bits == 1 || includeLineart)
+     os << "<scan:ColorMode>BlackAndWhite1</scan:ColorMode>\r\n";
+   for (const auto& cs : mTxtColorSpaces)
+     for (int i = 8; i <= bits; i += 8)
+@@ -354,7 +354,7 @@
+   os << "</scan:SupportedResolutions>\r\n"
+         "<scan:DocumentFormats>\r\n";
+   for (const auto& format : mDocumentFormats)
+-    if (bits != 1 || format != HttpServer::MIME_TYPE_JPEG)
++    if ((bits != 1 && !includeLineart) || format != HttpServer::MIME_TYPE_JPEG)
+     os << "<pwg:DocumentFormat>" << format << "</pwg:DocumentFormat>\r\n";
+   os << "</scan:DocumentFormats>\r\n"
+         "</scan:SettingProfile>\r\n";
+@@ -431,8 +431,16 @@
+      << "</scan:MaxPhysicalHeight>\r\n"
+         "<scan:MaxScanRegions>1</scan:MaxScanRegions>\r\n"
+         "<scan:SettingProfiles>\r\n";
+-  p->writeSettingProfile(mMaxBits, os);
+-  if (!p->mLineartScanModeName.empty()) p->writeSettingProfile(1, os);
++  // Apple AirScanScanner 63.3 builds its ICA color choices from profile 0.
++  // Put all accepted modes and their common lossless formats there. JPEG is
++  // still offered separately for continuous-tone modes; never advertise it
++  // for a one-bit mode. No new mode or resolution is synthesized here.
++  const bool haveLineart = !p->mLineartScanModeName.empty();
++  const bool commonFirstProfile = haveLineart && xeroxcrop::applies(
++      p->mDeviceInfo.name, p->mMakeAndModel, this == p->mpPlaten,
++      p->mpAdfSimplex != nullptr || p->mpAdfDuplex != nullptr);
++  p->writeSettingProfile(mMaxBits, os, commonFirstProfile);
++  if (haveLineart) p->writeSettingProfile(commonFirstProfile ? mMaxBits : 1, os);
+   os << "</scan:SettingProfiles>\r\n"
+         "<scan:SupportedIntents>\r\n";
+   for (const auto& s : mSupportedIntents)

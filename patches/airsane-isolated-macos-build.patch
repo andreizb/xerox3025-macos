@@ -1,0 +1,57 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 90311f9..5da08d6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -30,20 +30,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL FreeBSD)
+ endif()
+ 
+ if(APPLE)
+-  include_directories(
+-    /opt/local/include
+-    /opt/homebrew/include
+-    /usr/local/include
+-  )
+-  if(IS_DIRECTORY /opt/local/lib)
+-    link_directories(/opt/local/lib)
+-  endif()
+-  if(IS_DIRECTORY /opt/homebrew/lib)
+-    link_directories(/opt/homebrew/lib)
+-  endif()
+-  if(IS_DIRECTORY /usr/local/lib)
+-    link_directories(/usr/local/lib)
++  if(NOT ISOLATED_PREFIX)
++    message(FATAL_ERROR "Set ISOLATED_PREFIX to the native dependency prefix")
+   endif()
++  include_directories("${ISOLATED_PREFIX}/include")
++  set(CMAKE_INSTALL_RPATH "@executable_path/../lib")
++  set(CMAKE_FIND_FRAMEWORK NEVER)
++  foreach(DEP sane jpeg png16 usb-1.0)
++    find_library(ISOLATED_${DEP} NAMES ${DEP} PATHS "${ISOLATED_PREFIX}/lib" NO_DEFAULT_PATH REQUIRED)
++    list(APPEND ISOLATED_LIBRARIES "${ISOLATED_${DEP}}")
++  endforeach()
+   set(ZEROCONF_FILES
+     zeroconf/mdnspublisher-dnssd.mm
+     zeroconf/networkhotplugnotifier-macos.mm
+@@ -109,11 +105,8 @@ endif()
+ target_link_libraries(
+     ${PROJECT_NAME}
+     Threads::Threads
+-    sane
+-    jpeg
+-    png
++    ${ISOLATED_LIBRARIES}
+     ${ZEROCONF_LIBS}
+-    ${LIBUSB}
+     ${LIBATOMIC}
+ )
+ 
+@@ -122,9 +115,6 @@ if(APPLE)
+ install(TARGETS ${PROJECT_NAME}
+     RUNTIME DESTINATION sbin
+ )
+-install(FILES launchd/org.simulpiscator.airsaned.plist
+-    DESTINATION /Library/LaunchDaemons
+-)
+ 
+ install(CODE "
+     if(NOT EXISTS ${CMAKE_INSTALL_PREFIX}/etc/airsane/access.conf)

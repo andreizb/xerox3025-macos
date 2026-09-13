@@ -1,0 +1,714 @@
+diff --git a/basic/workerthread.cpp b/basic/workerthread.cpp
+index 15aabdb..960127f 100644
+--- a/basic/workerthread.cpp
++++ b/basic/workerthread.cpp
+@@ -25,6 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ struct WorkerThread::Private
+ {
++  std::mutex mSubmissionMutex;
+   std::mutex mMutex;
+   std::condition_variable mThreadCondition, mExecuteCondition;
+   Callable* mpCallable = nullptr;
+@@ -58,6 +59,9 @@ WorkerThread::~WorkerThread()
+ 
+ void WorkerThread::executeSynchronously(Callable& c)
+ {
++  // Serialize submitters until each has consumed its completion. A cancel
++  // request may arrive while the HTTP image request is waiting on this worker.
++  std::lock_guard<std::mutex> submission(p->mSubmissionMutex);
+   std::unique_lock<std::mutex> lock(p->mMutex);
+   assert(p->mpCallable == nullptr);
+   p->mpCallable = &c;
+diff --git a/imageformats/imageencoder.cpp b/imageformats/imageencoder.cpp
+index 840b67f..6a3a4b8 100644
+--- a/imageformats/imageencoder.cpp
++++ b/imageformats/imageencoder.cpp
+@@ -201,5 +201,5 @@ ImageEncoder::onParamChange()
+     default:
+       mComponents = 1;
+   }
+-  mBytesPerLine = (mComponents * mWidth * mBitDepth) / 8;
++  mBytesPerLine = (mComponents * mWidth * mBitDepth + 7) / 8;
+ }
+diff --git a/server/optionsfile.cpp b/server/optionsfile.cpp
+index e3de031..0ce5be9 100644
+--- a/server/optionsfile.cpp
++++ b/server/optionsfile.cpp
+@@ -97,6 +97,12 @@ OptionsFile::scannerOptions(const Scanner* pScanner) const
+     }
+     else if (option.first == "note" || option.first == "location")
+       processedOptions.note = option.second;
++    else if (option.first == "device-uuid")
++      processedOptions.uuid = option.second;
++    else if (option.first == "published-name")
++      processedOptions.published_name = option.second;
++    else if (option.first == "serial-number")
++      processedOptions.serial_number = option.second;
+     else if (option.first == "gray-gamma")
+       processedOptions.gray_gamma = ::atof(option.second.c_str());
+     else if (option.first == "color-gamma")
+diff --git a/server/optionsfile.h b/server/optionsfile.h
+index e2043fc..167a624 100644
+--- a/server/optionsfile.h
++++ b/server/optionsfile.h
+@@ -37,7 +37,7 @@ public:
+   typedef std::vector<std::pair<std::string, std::string>> RawOptions;
+   struct Options
+   {
+-    std::string icon, note;
++    std::string icon, note, uuid, published_name, serial_number;
+     double gray_gamma = 1.0, color_gamma = 1.0;
+     bool synthesize_gray = false;
+     RawOptions sane_options;
+diff --git a/server/scanjob.cpp b/server/scanjob.cpp
+index 7f74303..4197d7f 100644
+--- a/server/scanjob.cpp
++++ b/server/scanjob.cpp
+@@ -21,6 +21,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ #include "imageformats/pdfencoder.h"
+ #include "imageformats/pngencoder.h"
+ #include "scanner.h"
++#include "xeroxcrop.h"
+ #include "web/httpserver.h"
+ #include "basic/workerthread.h"
+ 
+@@ -123,16 +124,20 @@ struct ScanJob::Private
+   std::string mUuid;
+   std::atomic<::time_t> mCreated, mLastActive;
+   std::atomic<State> mState;
++  std::atomic<bool> mCancelRequested{false};
+   std::atomic<const char*> mStateReason;
+   std::atomic<SANE_Status> mAdfStatus;
+ 
+   std::string mScanSource, mIntent, mDocumentFormat, mColorMode;
+-  int mBitDepth, mRes_dpi;
+-  bool mColorScan;
+-  bool mDuplex;
++  int mBitDepth = 0, mRes_dpi = 300;
++  bool mColorScan = false;
++  bool mDuplex = false;
+   double mLeft_px, mTop_px, mWidth_px, mHeight_px;
++  bool mCropAcquisition = false;
++  double mAcquiredLeft_mm = 0, mAcquiredTop_mm = 0;
++  xeroxcrop::Raster mRasterCrop;
+ 
+-  std::atomic<int> mKind, mImagesCompleted;
++  std::atomic<int> mKind{single}, mImagesCompleted{0};
+   std::shared_ptr<sanecpp::session> mpSession;
+ 
+   OptionsFile::Options mDeviceOptions;
+@@ -238,6 +243,11 @@ ScanJob::Private::init(const ScanSettingsXml& settings, bool autoselectFormat, c
+     top = 0;
+   if (std::isnan(res_dpi))
+     res_dpi = 300;
++  if (!std::isfinite(res_dpi) || res_dpi < 1 ||
++      res_dpi > std::numeric_limits<int>::max()) {
++    err = PWG_INVALID_SCAN_TICKET;
++    res_dpi = 300;
++  }
+ 
+   double px_per_unit = 1.0;
+   std::string units = settings.getString("ContentRegionUnits");
+@@ -251,9 +261,9 @@ ScanJob::Private::init(const ScanSettingsXml& settings, bool autoselectFormat, c
+   mRes_dpi = res_dpi;
+ 
+   if (std::isnan(mWidth_px))
+-    mWidth_px = mpScanner->maxWidthPx300dpi();
++    mWidth_px = mpScanner->maxWidthPx300dpi() * res_dpi / 300.0;
+   if (std::isnan(mHeight_px))
+-    mHeight_px = mpScanner->maxHeightPx300dpi();
++    mHeight_px = mpScanner->maxHeightPx300dpi() * res_dpi / 300.0;
+ 
+   mBitDepth = 0;
+ 
+@@ -267,6 +277,10 @@ ScanJob::Private::init(const ScanSettingsXml& settings, bool autoselectFormat, c
+       mColorMode = mpScanner->colorScanModeName();
+       mColorScan = true;
+       mBitDepth = esclBpp / 3;
++    } else if (c == "BlackAndWhite" && esclBpp == 1 && !mpScanner->lineartScanModeName().empty()) {
++      mColorMode = mpScanner->lineartScanModeName();
++      mColorScan = false;
++      mBitDepth = 1;
+     } else if (c == "Grayscale") {
+       mColorMode = mpScanner->grayScanModeName();
+       mColorScan = false;
+@@ -278,6 +292,7 @@ ScanJob::Private::init(const ScanSettingsXml& settings, bool autoselectFormat, c
+       mColorMode = mpScanner->colorScanModeName();
+     else
+       mColorMode = mpScanner->grayScanModeName();
++    mColorScan = mColorMode == mpScanner->colorScanModeName();
+     mBitDepth = 8;
+   }
+ 
+@@ -293,6 +308,8 @@ ScanJob::Private::init(const ScanSettingsXml& settings, bool autoselectFormat, c
+ 
+   // If Apple Airscan requests JPEG, we send PNG instead because it is
+   // lossless and supports all bit depths.
++  if (mBitDepth == 1 && mDocumentFormat == HttpServer::MIME_TYPE_JPEG && !autoselectFormat)
++    err = PWG_UNSUPPORTED_DOCUMENT_FORMAT;
+   if (mDocumentFormat.empty() || autoselectFormat)
+     mDocumentFormat = HttpServer::MIME_TYPE_PNG;
+   std::clog << "document format used: " << mDocumentFormat << "\n";
+@@ -329,6 +346,19 @@ ScanJob::Private::init(const ScanSettingsXml& settings, bool autoselectFormat, c
+   }
+   std::clog << "job kind: " << kindString() << std::endl;
+ 
++  mCropAcquisition = xeroxcrop::applies(mpScanner->saneName(),
++      mpScanner->makeAndModel(), mKind == single, mpScanner->hasAdf());
++  if (mCropAcquisition) {
++    const double maxWidth = mpScanner->maxWidthPx300dpi() * res_dpi / 300.0;
++    const double maxHeight = mpScanner->maxHeightPx300dpi() * res_dpi / 300.0;
++    if (!std::isfinite(mLeft_px) || !std::isfinite(mTop_px) ||
++        !std::isfinite(mWidth_px) || !std::isfinite(mHeight_px) ||
++        mLeft_px < 0 || mTop_px < 0 || mWidth_px < 1 || mHeight_px < 1 ||
++        mLeft_px + mWidth_px > maxWidth + 1e-7 ||
++        mTop_px + mHeight_px > maxHeight + 1e-7)
++      err = PWG_INVALID_SCAN_TICKET;
++  }
++
+   applyDeviceOptions(options);
+ 
+   if (err) {
+@@ -367,7 +397,7 @@ ScanJob::Private::applyDeviceOptions(const OptionsFile::Options& options)
+     std::clog << "using color gamma of " << options.color_gamma << std::endl;
+     initGammaTable(options.color_gamma);
+   }
+-  if (!mColorScan) {
++  if (!mColorScan && mBitDepth != 1) {
+     if (options.synthesize_gray) {
+       std::clog << "synthesizing grayscale from RGB" << std::endl;
+       mColorMode = mpScanner->colorScanModeName();
+@@ -400,6 +430,11 @@ ScanJob::Private::initGammaTable(float gammaVal)
+ void
+ ScanJob::Private::applyGamma(std::vector<char>& ioData)
+ {
++  // SANE's packed one-bit gray is 1=black; PNG/PDF DeviceGray is 0=black.
++  if (mBitDepth == 1) {
++    for (auto& byte : ioData) byte = static_cast<char>(~static_cast<unsigned char>(byte));
++    return;
++  }
+   union
+   {
+     char* c;
+@@ -474,6 +509,11 @@ ScanJob::Private::atomicTransition(State from, State to)
+ void
+ ScanJob::Private::updateStatus(SANE_Status status)
+ {
++  if (mCancelRequested) {
++    mState = canceled;
++    mStateReason = PWG_JOB_CANCELED_BY_USER;
++    return;
++  }
+   mAdfStatus = SANE_STATUS_GOOD;
+   switch (status) {
+     case SANE_STATUS_GOOD:
+@@ -595,11 +635,15 @@ ScanJob::Private::beginTransfer()
+     return false;
+   bool ok = true;
+   if (!mpSession) {
+-    ok = (openSession() == SANE_STATUS_GOOD);
++    SANE_Status status = openSession();
++    ok = (status == SANE_STATUS_GOOD);
+     if (ok)
+       mpSession->dump_options();
++    else
++      updateStatus(status);
+   }
+-  startSession();
++  if (ok)
++    startSession();
+   ok = isProcessing();
+   if (!ok)
+     closeSession();
+@@ -628,6 +672,9 @@ ScanJob::Private::openSession()
+     if (!ok)
+       ok = opt[SANE_NAME_SCAN_X_RESOLUTION].set_numeric_value(mRes_dpi) ||
+            opt[SANE_NAME_SCAN_Y_RESOLUTION].set_numeric_value(mRes_dpi);
++    if (mCropAcquisition &&
++        opt[SANE_NAME_SCAN_RESOLUTION].numeric_value() != mRes_dpi)
++      return SANE_STATUS_INVAL;
+ 
+     double left = mLeft_px, top = mTop_px, right = mLeft_px + mWidth_px,
+            bottom = mTop_px + mHeight_px;
+@@ -642,12 +689,44 @@ ScanJob::Private::openSession()
+       default:
+         ok = false;
+     }
+-    for (auto p : { &left, &right, &top, &bottom })
+-      *p = ::floor(*p + 0.5);
+-    opt[SANE_NAME_SCAN_TL_X] = left;
+-    opt[SANE_NAME_SCAN_TL_Y] = top;
++    if (mCropAcquisition) {
++      try {
++        if (opt[SANE_NAME_SCAN_TL_X].unit() != SANE_UNIT_MM)
++          throw std::runtime_error("unexpected Xerox crop units");
++        const auto x = xeroxcrop::acquisitionAxis(mLeft_px, mWidth_px, mRes_dpi,
++            opt[SANE_NAME_SCAN_TL_X].min(), opt[SANE_NAME_SCAN_BR_X].max());
++        const auto y = xeroxcrop::acquisitionAxis(mTop_px, mHeight_px, mRes_dpi,
++            opt[SANE_NAME_SCAN_TL_Y].min(), opt[SANE_NAME_SCAN_BR_Y].max());
++        left = x.beginMm;
++        right = x.endMm;
++        top = y.beginMm;
++        bottom = y.endMm;
++      } catch (const std::runtime_error& e) {
++        std::cerr << e.what() << std::endl;
++        return SANE_STATUS_INVAL;
++      }
++    } else {
++      for (auto p : { &left, &right, &top, &bottom })
++        *p = ::floor(*p + 0.5);
++    }
++    // xerox_mfp retains its previous window and swaps crossed endpoints after
++    // each individual option write. Reset the origin before moving the end.
++    opt[SANE_NAME_SCAN_TL_X] = opt[SANE_NAME_SCAN_TL_X].min();
++    opt[SANE_NAME_SCAN_TL_Y] = opt[SANE_NAME_SCAN_TL_Y].min();
+     opt[SANE_NAME_SCAN_BR_X] = right;
+     opt[SANE_NAME_SCAN_BR_Y] = bottom;
++    opt[SANE_NAME_SCAN_TL_X] = left;
++    opt[SANE_NAME_SCAN_TL_Y] = top;
++
++    if (mCropAcquisition) {
++      mAcquiredLeft_mm = opt[SANE_NAME_SCAN_TL_X].numeric_value();
++      mAcquiredTop_mm = opt[SANE_NAME_SCAN_TL_Y].numeric_value();
++      const double acceptedRight = opt[SANE_NAME_SCAN_BR_X].numeric_value();
++      const double acceptedBottom = opt[SANE_NAME_SCAN_BR_Y].numeric_value();
++      if (!std::isfinite(acceptedRight) || !std::isfinite(acceptedBottom) ||
++          acceptedRight <= mAcquiredLeft_mm || acceptedBottom <= mAcquiredTop_mm)
++        ok = false;
++    }
+ 
+     if (!ok)
+       status = SANE_STATUS_INVAL;
+@@ -659,6 +738,17 @@ void
+ ScanJob::Private::startSession()
+ {
+   SANE_Status status = mpSession->start().status();
++  if (status == SANE_STATUS_GOOD && mCropAcquisition) {
++    const auto p = mpSession->parameters();
++    try {
++      mRasterCrop = xeroxcrop::raster(mLeft_px, mTop_px, mWidth_px, mHeight_px,
++          mRes_dpi, mAcquiredLeft_mm, mAcquiredTop_mm,
++          p->pixels_per_line, p->lines);
++    } catch (const std::runtime_error& e) {
++      std::cerr << e.what() << std::endl;
++      status = SANE_STATUS_IO_ERROR;
++    }
++  }
+   updateStatus(status);
+ }
+ 
+@@ -724,11 +814,21 @@ ScanJob::Private::finishTransfer(std::ostream& os)
+     else
+       pEncoder->setColorspace(ImageEncoder::Grayscale);
+     auto p = mpSession->parameters();
+-    pEncoder->setWidth(p->pixels_per_line);
+-    pEncoder->setHeight(p->lines);
++    pEncoder->setWidth(mCropAcquisition ? mRasterCrop.width : p->pixels_per_line);
++    pEncoder->setHeight(mCropAcquisition ? mRasterCrop.height : p->lines);
+     pEncoder->setBitDepth(p->depth);
+     pEncoder->setDestination(&os);
+-    if (!mColorScan && mDeviceOptions.synthesize_gray) {
++    if (mCropAcquisition) {
++      const int components = p->format == SANE_FRAME_RGB ? 3 : 1;
++      const auto expected = (size_t(p->pixels_per_line) * components * p->depth + 7) / 8;
++      if (p->pixels_per_line <= 0 || p->lines <= 0 ||
++          (p->format != SANE_FRAME_RGB && p->format != SANE_FRAME_GRAY) ||
++          size_t(p->bytes_per_line) != expected) {
++        std::cerr << "unexpected Xerox acquisition row layout" << std::endl;
++        mState = aborted;
++        mStateReason = PWG_ERRORS_DETECTED;
++      }
++    } else if (!mColorScan && mDeviceOptions.synthesize_gray) {
+       if (pEncoder->bytesPerLine() != p->bytes_per_line / 3) {
+             std::cerr << __FILE__ << ", line " << __LINE__
+                       << ": encoder bytesPerLine (" << pEncoder->bytesPerLine()
+@@ -748,18 +848,32 @@ ScanJob::Private::finishTransfer(std::ostream& os)
+   }
+   while (isProcessing()) {
+     int linesWritten = 0;
++    int linesRead = 0;
+     mLastActive = ::time(nullptr);
+     std::vector<char> buffer(mpSession->parameters()->bytes_per_line);
++    std::vector<char> cropped;
++    const int sourceWidth = mpSession->parameters()->pixels_per_line;
++    const int depth = mpSession->parameters()->depth;
+     SANE_Status status = SANE_STATUS_GOOD;
+     while (status == SANE_STATUS_GOOD && os && isProcessing()) {
+       status = mpSession->read(buffer).status();
+       mLastActive = ::time(nullptr);
+       if (status == SANE_STATUS_GOOD) {
++        const bool outputRow = !mCropAcquisition || mRasterCrop.containsRow(linesRead);
++        ++linesRead;
++        if (!outputRow)
++          continue; // Drain overscan rows through EOF; cancellation stays active.
+         applyGamma(buffer);
+         if (!mColorScan && mDeviceOptions.synthesize_gray)
+           synthesizeGray(buffer);
+         try {
+-          pEncoder->writeLine(buffer.data());
++          const char* row = buffer.data();
++          if (mCropAcquisition) {
++            xeroxcrop::cropRow(buffer, sourceWidth, mRasterCrop.left,
++                mRasterCrop.width, mColorScan ? 3 : 1, depth, cropped);
++            row = cropped.data();
++          }
++          pEncoder->writeLine(row);
+           ++linesWritten;
+           if (!os.flush())
+             throw std::runtime_error("Could not send data, state: " + describeStreamState(os));
+@@ -776,7 +890,8 @@ ScanJob::Private::finishTransfer(std::ostream& os)
+       ++mImagesCompleted;
+       std::clog << "images completed: " << mImagesCompleted << std::endl;
+       updateStatus(status);
+-      if (pEncoder->linesLeftInCurrentImage() != pEncoder->height()) {
++      if (pEncoder->linesLeftInCurrentImage() != pEncoder->height() ||
++          (mCropAcquisition && linesWritten != mRasterCrop.height)) {
+         std::cerr << "incomplete or excess scan data" << std::endl;
+         mState = aborted;
+         mStateReason = PWG_ERRORS_DETECTED;
+@@ -791,9 +906,19 @@ ScanJob::Private::finishTransfer(std::ostream& os)
+ ScanJob&
+ ScanJob::cancel()
+ {
++  p->mCancelRequested = true;
+   p->mState = canceled;
+   p->mStateReason = PWG_JOB_CANCELED_BY_USER;
+-  p->closeSession();
++  // xerox_mfp does synchronous I/O and does not support freeing the device
++  // while sane_read() is using it. Queue cleanup on its existing job worker.
++  // The transfer loop observes canceled; TCP I/O has a bounded deadline.
++  struct : WorkerThread::Callable
++  {
++    Private* p = nullptr;
++    void onCall() override { p->closeSession(); }
++  } cleanup;
++  cleanup.p = p;
++  p->mWorkerThread.executeSynchronously(cleanup);
+   return *this;
+ }
+ 
+diff --git a/server/scanner.cpp b/server/scanner.cpp
+index df325d7..0bfaa38 100644
+--- a/server/scanner.cpp
++++ b/server/scanner.cpp
+@@ -29,6 +29,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ #include "basic/uuid.h"
+ #include "scanjob.h"
++#include "xeroxcrop.h"
+ #include "web/httpserver.h"
+ 
+ namespace {
+@@ -205,7 +206,7 @@ struct Scanner::Private
+     void writeCapabilitiesXml(std::ostream&) const;
+   } * mpPlaten, *mpAdfSimplex, *mpAdfDuplex;
+ 
+-  std::string mGrayScanModeName, mColorScanModeName;
++  std::string mGrayScanModeName, mColorScanModeName, mLineartScanModeName;
+   mutable int mCurrentProfile;
+   OptionsFile::Options mDeviceOptions;
+ 
+@@ -264,7 +265,7 @@ Scanner::Private::writeScannerCapabilitiesXml(std::ostream& os) const
+         "<pwg:MakeAndModel>"
+      << xmlEscape(mMakeAndModel)
+      << "</pwg:MakeAndModel>\r\n"
+-     << "<pwg:SerialNumber>1.0</pwg:SerialNumber>\r\n"
++     << "<pwg:SerialNumber>" << xmlEscape(mDeviceOptions.serial_number.empty() ? mUuid : mDeviceOptions.serial_number) << "</pwg:SerialNumber>\r\n"
+      << "<scan:UUID>"
+      << mUuid << "</scan:UUID>\r\n";
+   if (!mAdminUrl.empty())
+@@ -301,6 +302,8 @@ Scanner::Private::writeSettingProfile(int bits, std::ostream& os) const
+   os << "<scan:SettingProfile name='" << mCurrentProfile++
+      << "'>\r\n"
+         "<scan:ColorModes>\r\n";
++  if (bits == 1)
++    os << "<scan:ColorMode>BlackAndWhite1</scan:ColorMode>\r\n";
+   for (const auto& cs : mTxtColorSpaces)
+     for (int i = 8; i <= bits; i += 8)
+       os << "<scan:ColorMode>" << colorMode(cs, i) << "</scan:ColorMode>\r\n";
+@@ -351,6 +354,7 @@ Scanner::Private::writeSettingProfile(int bits, std::ostream& os) const
+   os << "</scan:SupportedResolutions>\r\n"
+         "<scan:DocumentFormats>\r\n";
+   for (const auto& format : mDocumentFormats)
++    if (bits != 1 || format != HttpServer::MIME_TYPE_JPEG)
+     os << "<pwg:DocumentFormat>" << format << "</pwg:DocumentFormat>\r\n";
+   os << "</scan:DocumentFormats>\r\n"
+         "</scan:SettingProfile>\r\n";
+@@ -428,6 +432,7 @@ Scanner::Private::InputSource::writeCapabilitiesXml(std::ostream& os) const
+         "<scan:MaxScanRegions>1</scan:MaxScanRegions>\r\n"
+         "<scan:SettingProfiles>\r\n";
+   p->writeSettingProfile(mMaxBits, os);
++  if (!p->mLineartScanModeName.empty()) p->writeSettingProfile(1, os);
+   os << "</scan:SettingProfiles>\r\n"
+         "<scan:SupportedIntents>\r\n";
+   for (const auto& s : mSupportedIntents)
+@@ -481,6 +486,18 @@ Scanner::Private::init2(const OptionsFile& optionsfile)
+   // Apply device options first so any changes to dependent parameters
+   // are detected during initialization.
+   mDeviceOptions = optionsfile.scannerOptions(p);
++  if (!mDeviceOptions.uuid.empty()) {
++    const std::string& u = mDeviceOptions.uuid;
++    if (u.size() != 36) return "invalid configured device UUID";
++    for (size_t i = 0; i < u.size(); ++i) {
++      bool dash = (i == 8 || i == 13 || i == 18 || i == 23);
++      if (dash ? u[i] != '-' : !std::isxdigit(static_cast<unsigned char>(u[i])))
++        return "invalid configured device UUID";
++    }
++    mUuid = u;
++  }
++  if (!mDeviceOptions.published_name.empty())
++    mPublishedName = mDeviceOptions.published_name;
+   for (const auto &option : mDeviceOptions.sane_options) {
+     if (opt[option.first].is_null()) {
+       std::clog << "SANE option specified in options file: " << option.first << ", does not exist" << std::endl;
+@@ -514,6 +531,10 @@ Scanner::Private::init2(const OptionsFile& optionsfile)
+     modes.push_back("Gray");
+     modes.push_back("Color");
+   }
++  if (std::find(modes.begin(), modes.end(), "Lineart") != modes.end()) {
++    mLineartScanModeName = "Lineart";
++    mColorModes.push_back("BlackAndWhite1");
++  }
+   mGrayScanModeName = findGrayName(modes);
+   mColorScanModeName = findColorName(modes);
+   if (mGrayScanModeName.empty() && mColorScanModeName.empty()) {
+@@ -653,13 +674,20 @@ Scanner::Private::InputSource::init(const sanecpp::option_set& opt)
+       return "unexpected unit in scan area parameters";
+   }
+ 
++  const auto sources = opt[SANE_NAME_SCAN_SOURCE].allowed_string_values();
++  const bool xeroxFlatbed = unit == SANE_UNIT_MM &&
++      xeroxcrop::applies(p->mDeviceInfo.name, p->mMakeAndModel,
++          mSourceName == findFlatbedName(sources), sources.size() != 1);
++
+   for (auto pValue : { &mMinWidth,
+                        &mMaxWidth,
+                        &mMinHeight,
+                        &mMaxHeight,
+                        &mMaxPhysicalWidth,
+                        &mMaxPhysicalHeight })
+-    *pValue = ::floor(*pValue * f + 0.5);
++    *pValue = xeroxFlatbed && *pValue > 0
++        ? xeroxcrop::backendPixels(*pValue, 300)
++        : ::floor(*pValue * f + 0.5);
+   return nullptr;
+ }
+ 
+@@ -889,6 +917,12 @@ Scanner::adfDuplexSourceName() const
+   return p->mpAdfDuplex ? p->mpAdfDuplex->mSourceName : "";
+ }
+ 
++std::string
++Scanner::lineartScanModeName() const
++{
++  return p->mLineartScanModeName;
++}
++
+ std::string
+ Scanner::grayScanModeName() const
+ {
+diff --git a/server/scanner.h b/server/scanner.h
+index ed58e5a..9506997 100644
+--- a/server/scanner.h
++++ b/server/scanner.h
+@@ -82,6 +82,7 @@ public:
+   std::string adfDuplexSourceName() const;
+   std::string grayScanModeName() const;
+   std::string colorScanModeName() const;
++  std::string lineartScanModeName() const;
+ 
+   std::shared_ptr<ScanJob> createJobFromScanSettingsXml(
+     const std::string&,
+diff --git a/zeroconf/mdnspublisher-dnssd.mm b/zeroconf/mdnspublisher-dnssd.mm
+index c4cc0ab..05a814c 100644
+--- a/zeroconf/mdnspublisher-dnssd.mm
++++ b/zeroconf/mdnspublisher-dnssd.mm
+@@ -25,6 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ #include <Foundation/Foundation.h>
+ #include <dns_sd.h>
+ #include <netdb.h>
++#include <net/if.h>
+ #include <unistd.h>
+ 
+ namespace {
+@@ -116,6 +117,8 @@ struct ServiceEntry
+     int ifindex = mpService->interfaceIndex();
+     if (ifindex < 0)
+       ifindex = 0;
++    bool localOnly = ifindex == static_cast<int>(if_nametoindex("lo0"));
++    if (localOnly) ifindex = kDNSServiceInterfaceIndexLocalOnly;
+     uint16_t port = mpService->port();
+     DNSServiceErrorType err =
+       ::DNSServiceRegister(&mDNSServiceRef,
+@@ -124,7 +127,7 @@ struct ServiceEntry
+                            mpService->name().c_str(),
+                            mpService->type().c_str(),
+                            nullptr,
+-                           nullptr,
++                           localOnly ? "localhost." : nullptr,
+                            htons(port),
+                            ::TXTRecordGetLength(&txtRecord),
+                            ::TXTRecordGetBytesPtr(&txtRecord),
+diff --git a/server/xeroxcrop.h b/server/xeroxcrop.h
+new file mode 100644
+index 0000000..f01f22c
+--- /dev/null
++++ b/server/xeroxcrop.h
+@@ -0,0 +1,156 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// WorkCentre 3025 flatbed acquisition and lossless raster crop helpers.
++#ifndef XEROX_CROP_H
++#define XEROX_CROP_H
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace xeroxcrop {
++
++inline bool applies(const std::string& saneName, const std::string& model,
++                    bool platen, bool hasAdf)
++{
++  return platen && !hasAdf && saneName.compare(0, 10, "xerox_mfp:") == 0 &&
++         model == "Xerox WorkCentre 3025";
++}
++
++inline int pixelCount(double value)
++{
++  // eSCL dimensions may be fractional pixels at resolutions below 300 dpi.
++  // Keep only complete requested pixels; never invent an extra boundary pixel.
++  if (!std::isfinite(value) || value < 1 ||
++      value > std::numeric_limits<int>::max())
++    throw std::runtime_error("invalid crop pixel count");
++  return static_cast<int>(std::floor(value + 1e-9));
++}
++
++inline double fixedMm(double value)
++{
++  // SANE_TYPE_FIXED uses signed 16.16, truncated by SANE_FIX.
++  return std::floor(value * 65536.0) / 65536.0;
++}
++
++inline double encodedOriginMm(double acceptedMm)
++{
++  // xerox_mfp dev_set_window writes an inch byte and a hundredths byte.
++  // Reproduce its truncation, including floating-point boundary behavior.
++  const double inches = acceptedMm / 25.4;
++  const double whole = std::floor(inches);
++  return (whole + std::floor((inches - whole) * 100.0) / 100.0) * 25.4;
++}
++
++inline int backendPixels(double extentMm, int dpi)
++{
++  if (!std::isfinite(extentMm) || extentMm <= 0 || dpi <= 0)
++    throw std::runtime_error("invalid backend extent");
++  // The patched model uses integer 1200-point windows, then truncates again
++  // to the selected output resolution in set_parameters().
++  return static_cast<int>(std::floor(std::floor(extentMm * (1200.0 / 25.4)) /
++                                     (1200.0 / dpi)));
++}
++
++struct Axis
++{
++  double beginMm = 0, endMm = 0;
++};
++
++inline Axis acquisitionAxis(double startPx, double sizePx, int dpi,
++                            double bedBeginMm, double bedEndMm)
++{
++  if (!std::isfinite(startPx) || startPx < 0 || dpi <= 0 ||
++      !std::isfinite(bedBeginMm) || !std::isfinite(bedEndMm) ||
++      bedBeginMm != 0 || bedEndMm <= bedBeginMm)
++    throw std::runtime_error("invalid acquisition bounds");
++  pixelCount(sizePx);
++  const double begin = startPx * 25.4 / dpi;
++  const double end = (startPx + sizePx) * 25.4 / dpi;
++  if (!std::isfinite(end) || begin < bedBeginMm || end > bedEndMm + 1e-7)
++    throw std::runtime_error("crop exceeds flatbed bounds");
++
++  // The device erases approximately 2 mm around every requested window.
++  // Acquire 3 mm more, on the device's 0.01-inch origin grid. A small positive
++  // offset survives SANE's fixed-point conversion without falling into the
++  // previous hundredth-inch bucket. Read-back remains authoritative.
++  const double grid = 0.254, margin = 3.0;
++  Axis axis;
++  axis.beginMm = std::max(bedBeginMm,
++      std::floor((begin - margin) / grid) * grid + 0.0001);
++  axis.endMm = std::min(bedEndMm, std::ceil((end + margin) / grid) * grid);
++  return axis;
++}
++
++struct Raster
++{
++  int left = 0, top = 0, width = 0, height = 0;
++
++  bool containsRow(int row) const
++  { return row >= top && row - top < height; }
++};
++
++inline Raster raster(double leftPx, double topPx, double widthPx,
++                     double heightPx, int dpi, double acceptedLeftMm,
++                     double acceptedTopMm, int acquiredWidth,
++                     int acquiredHeight)
++{
++  if (!std::isfinite(leftPx) || !std::isfinite(topPx) || dpi <= 0 ||
++      !std::isfinite(acceptedLeftMm) || !std::isfinite(acceptedTopMm))
++    throw std::runtime_error("invalid raster crop origin");
++  Raster result;
++  const double left = leftPx - encodedOriginMm(acceptedLeftMm) * dpi / 25.4;
++  const double top = topPx - encodedOriginMm(acceptedTopMm) * dpi / 25.4;
++  if (left < -1e-7 || top < -1e-7 ||
++      left > std::numeric_limits<int>::max() ||
++      top > std::numeric_limits<int>::max())
++    throw std::runtime_error("acquisition does not contain crop origin");
++  result.left = static_cast<int>(std::floor(std::max(0.0, left) + 1e-7));
++  result.top = static_cast<int>(std::floor(std::max(0.0, top) + 1e-7));
++  result.width = pixelCount(widthPx);
++  result.height = pixelCount(heightPx);
++  if (result.left > acquiredWidth || result.width > acquiredWidth - result.left ||
++      result.top > acquiredHeight || result.height > acquiredHeight - result.top)
++    throw std::runtime_error("acquired raster does not contain requested crop");
++  return result;
++}
++
++inline void cropRow(const std::vector<char>& source, int sourceWidth,
++                    int left, int width, int components, int depth,
++                    std::vector<char>& destination)
++{
++  if (sourceWidth <= 0 || left < 0 || width <= 0 || left > sourceWidth ||
++      width > sourceWidth - left || (components != 1 && components != 3) ||
++      (depth != 1 && depth != 8 && depth != 16) ||
++      (depth == 1 && components != 1))
++    throw std::runtime_error("invalid raster row crop");
++  const size_t bitsPerPixel = components * depth;
++  const size_t inputBytes = (size_t(sourceWidth) * bitsPerPixel + 7) / 8;
++  const size_t outputBytes = (size_t(width) * bitsPerPixel + 7) / 8;
++  if (source.size() < inputBytes || &source == &destination)
++    throw std::runtime_error("truncated or aliased raster row");
++  destination.resize(outputBytes);
++  if (depth != 1) {
++    std::memcpy(destination.data(), source.data() + size_t(left) * bitsPerPixel / 8,
++                outputBytes);
++    return;
++  }
++  // SANE and PNG both store the leftmost pixel in the high bit. Polarity has
++  // already been converted by applyGamma; copy bits without interpreting them.
++  // Unused final-byte bits are white (1) and are outside the declared width.
++  std::fill(destination.begin(), destination.end(), static_cast<char>(0xff));
++  for (int x = 0; x < width; ++x) {
++    const unsigned pixel = static_cast<unsigned char>(source[(left + x) / 8]) &
++                           (0x80u >> ((left + x) % 8));
++    if (!pixel)
++      destination[x / 8] = static_cast<char>(
++          static_cast<unsigned char>(destination[x / 8]) & ~(0x80u >> (x % 8)));
++  }
++}
++
++} // namespace xeroxcrop
++#endif

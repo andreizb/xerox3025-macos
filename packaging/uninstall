@@ -1,0 +1,37 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+set -eu
+uninstall_base="$HOME/Library"
+uninstall_running=true
+uninstall_python_option=''
+while (( $# )); do
+  case "$1" in
+    --staging-library) [[ $# -ge 2 ]] || exit 64; uninstall_base="$2"; uninstall_running=false; shift 2 ;;
+    --python) [[ $# -ge 2 ]] || exit 64; uninstall_python_option="$2"; shift 2 ;;
+    *) printf 'usage: uninstall [--python ABSOLUTE-PATH] [--staging-library ABSOLUTE-PATH]\n' >&2; exit 64 ;;
+  esac
+done
+[[ "$uninstall_base" == /* ]] || exit 64
+uninstall_root="$uninstall_base/Application Support/Xerox3025Bridge"
+uninstall_plist="$uninstall_base/LaunchAgents/local.xerox3025.bridge.plist"
+[[ ! -L "$uninstall_root" && ! -L "$uninstall_plist" ]] || { printf 'Refusing symlink paths.\n' >&2; exit 73; }
+if [[ ! -e "$uninstall_root" && ! -e "$uninstall_plist" ]]; then printf 'Already uninstalled.\n'; exit 0; fi
+[[ -f "$uninstall_root/receipt" && "$(cat "$uninstall_root/receipt")" == 'local.xerox3025.bridge receipt v1' ]] || { printf 'Missing or invalid ownership receipt; nothing removed.\n' >&2; exit 73; }
+if [[ -e "$uninstall_root/association-review" || -L "$uninstall_root/association-review" ]]; then
+  # Restore before unloading or deleting anything. Conflicts and a missing
+  # maintenance interpreter leave the working service and rollback intact.
+  (cd "$uninstall_root/maintenance" && /usr/bin/shasum -a 256 -c "$uninstall_root/maintenance.sha256")
+  uninstall_saved_python="$(cat "$uninstall_root/association-python")"
+  uninstall_python="$(/bin/bash "$uninstall_root/maintenance/select-python" "$uninstall_python_option" "$uninstall_saved_python")"
+  uninstall_restore_args=(--restore "$uninstall_root/association-review")
+  [[ "$uninstall_running" == true ]] || uninstall_restore_args+=(--staging)
+  "$uninstall_python" -I "$uninstall_root/maintenance/association-maintenance.py" "${uninstall_restore_args[@]}"
+fi
+if [[ "$uninstall_running" == true ]]; then
+  if /bin/launchctl print "gui/$(/usr/bin/id -u)/local.xerox3025.bridge" >/dev/null 2>&1; then
+    /bin/launchctl bootout "gui/$(/usr/bin/id -u)/local.xerox3025.bridge"
+  fi
+fi
+rm -f "$uninstall_plist"
+rm -rf "$uninstall_root"
+printf 'Bridge runtime, state, logs, autostart and owned association rollback removed. User scan documents and existing printer queues retained.\n'

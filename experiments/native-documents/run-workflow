@@ -1,0 +1,79 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Executed only by an explicitly selected Apple workflow. No daemon or watcher.
+set -eu
+umask 077
+if [ "$#" -lt 3 ]; then
+  printf '%s\n' 'Expected ACTION OUTPUT_FOLDER PDF [PDF].' >&2
+  exit 2
+fi
+document_action="$1"
+document_destination="$2"
+shift 2
+document_root="$(cd "$(dirname "$0")" && pwd -P)"
+document_fronts=''
+document_backs=''
+document_front_prefix=''
+document_back_prefix=''
+case "$document_action" in
+  interleave-same|interleave-reverse)
+    if [ "$#" -ne 2 ]; then
+      printf '%s\n' 'Select exactly two PDFs named name-fronts.pdf and name-backs.pdf in Finder.' >&2
+      exit 2
+    fi
+    for document_input in "$@"; do
+      document_base="$(basename "$document_input")"
+      case "$document_base" in
+        *fronts.pdf) document_fronts="$document_input"; document_front_prefix="${document_base%fronts.pdf}" ;;
+        *backs.pdf) document_backs="$document_input"; document_back_prefix="${document_base%backs.pdf}" ;;
+        *) printf '%s\n' 'Use matching filenames ending in fronts.pdf and backs.pdf; selection order is ignored.' >&2; exit 2 ;;
+      esac
+    done
+    if [ -z "$document_fronts" ] || [ -z "$document_backs" ] || [ "$document_front_prefix" != "$document_back_prefix" ]; then
+      printf '%s\n' 'Front/back filenames must have the same prefix.' >&2
+      exit 2
+    fi
+    ;;
+  remove-empty|booklet|id-card|deskew)
+    if [ "$#" -ne 1 ]; then
+      printf '%s\n' 'This workflow takes exactly one PDF. Combine pages in Preview first.' >&2
+      exit 2
+    fi
+    ;;
+  *) printf '%s\n' 'Unknown Xerox document workflow.' >&2; exit 2 ;;
+esac
+for document_input in "$@"; do
+  if [ ! -f "$document_input" ]; then
+    printf '%s\n' 'An input PDF is missing or is not a regular file.' >&2
+    exit 2
+  fi
+done
+if [ "$document_action" = deskew ] && [ ! -x "$document_root/bin/xerox-pdf-deskew" ]; then
+  printf '%s\n' 'The optional deskew component is not installed.' >&2
+  exit 2
+fi
+mkdir -p "$document_destination"
+document_run="$(mktemp -d "$document_destination/Xerox-$document_action.XXXXXXXX")"
+document_success=no
+trap 'if [ "$document_success" != yes ]; then /bin/rm -rf "$document_run"; fi' EXIT
+case "$document_action" in
+  interleave-same|interleave-reverse)
+    /bin/cp "$document_fronts" "$document_run/original-fronts.pdf"
+    /bin/cp "$document_backs" "$document_run/original-backs.pdf"
+    "$document_root/bin/xerox-document" interleave --fronts "$document_run/original-fronts.pdf" \
+      --backs "$document_run/original-backs.pdf" --back-order "${document_action#interleave-}" \
+      --output "$document_run/processed.pdf" > "$document_run/report.json"
+    ;;
+  deskew)
+    /bin/cp "$1" "$document_run/original.pdf"
+    "$document_root/bin/xerox-pdf-deskew" "$document_run/original.pdf" "$document_run/processed.pdf" > "$document_run/report.json"
+    ;;
+  *)
+    /bin/cp "$1" "$document_run/original.pdf"
+    "$document_root/bin/xerox-document" "$document_action" --input "$document_run/original.pdf" \
+      --output "$document_run/processed.pdf" > "$document_run/report.json"
+    ;;
+esac
+chmod 600 "$document_run"/*
+document_success=yes
+printf '%s\n' "$document_run/processed.pdf"

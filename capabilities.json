@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "acceptance_complete": false,
+  "device_family": "Xerox WorkCentre 3025",
+  "qualified_variant": "BI",
+  "qualified_transport": "Wi-Fi TCP 9400",
+  "tested_architecture": "arm64",
+  "historical_tested_macos": "26.6.2",
+  "hardware_acceptance_date": "2026-09-09",
+  "identity": "private hardware UUID resolved through Bonjour",
+  "scan_dpi_qualified": [
+    75,
+    100,
+    150,
+    200,
+    300,
+    600
+  ],
+  "scan_modes": [
+    "RGB24",
+    "Grayscale8",
+    "BlackAndWhite1"
+  ],
+  "flatbed": true,
+  "adf": false,
+  "fax": false,
+  "automatic_duplex": false,
+  "native_routes_separately_accepted": [
+    "original queue Open Scanner / Print Center",
+    "Image Capture",
+    "Preview"
+  ],
+  "ocr_preference_persistence": false,
+  "usb_acceptance": false,
+  "ni_acceptance": false,
+  "future_macos_compatibility": "unknown",
+  "optional_document_ui_acceptance": false,
+  "physical_margin_calibration": false,
+  "details": "docs/STATUS.md"
+}

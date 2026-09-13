@@ -1,0 +1,23 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Metadata-only diagnostic report. Never reads scanned documents or service logs.
+set -eu
+diag_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+printf 'Xerox3025Bridge diagnostic metadata\n'
+/usr/bin/sw_vers
+/usr/bin/uname -m
+for diag_file in "$diag_root"/bin/airsaned "$diag_root"/bin/discover "$diag_root"/bin/scanimage "$diag_root"/bin/service-lock "$diag_root"/lib/*.dylib "$diag_root"/lib/sane/*.so; do
+  printf '%s: ' "${diag_file##*/}"
+  /usr/bin/lipo -archs "$diag_file"
+done
+if /bin/launchctl print "gui/$(/usr/bin/id -u)/local.xerox3025.bridge" >/dev/null 2>&1; then
+  printf 'autostart: registered\n'
+else
+  printf 'autostart: not registered\n'
+fi
+if /usr/bin/curl --noproxy '*' --silent --fail --max-time 5 http://127.0.0.1:18325/eSCL/ScannerCapabilities >/dev/null; then
+  printf 'local scanner endpoint: responds\n'
+else
+  printf 'local scanner endpoint: unavailable\n'
+fi
+printf 'Device identity, IP addresses, filenames, logs and scanned content omitted.\n'

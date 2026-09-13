@@ -1,0 +1,99 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Reviewable per-user installer. Optional queue association requires an explicit review.
+set -eu
+umask 077
+package_dir="$(cd "$(dirname "$0")" && pwd -P)"
+install_base="$HOME/Library"
+install_start=true
+install_review=''
+install_python_option=''
+while (( $# )); do
+  case "$1" in
+    --staging-library) [[ $# -ge 2 ]] || exit 64; install_base="$2"; install_start=false; shift 2 ;;
+    --association-review) [[ $# -ge 2 ]] || exit 64; install_review="$2"; shift 2 ;;
+    --python) [[ $# -ge 2 ]] || exit 64; install_python_option="$2"; shift 2 ;;
+    *) printf 'usage: install [--association-review PRIVATE-REVIEW] [--python ABSOLUTE-PATH] [--staging-library ABSOLUTE-PATH]\n' >&2; exit 64 ;;
+  esac
+done
+[[ -n "$install_review" || -z "$install_python_option" ]] || exit 64
+[[ "$install_base" == /* ]] || exit 64
+[[ "$(/usr/bin/uname -m)" == arm64 ]] || { printf 'An ARM64 Mac is required.\n' >&2; exit 64; }
+install_root="$install_base/Application Support/Xerox3025Bridge"
+install_plist="$install_base/LaunchAgents/local.xerox3025.bridge.plist"
+if [[ -e "$install_root" || -L "$install_root" || -e "$install_plist" || -L "$install_plist" ]]; then
+  printf 'An existing installation or conflicting path exists. Uninstall it before installing this candidate.\n' >&2; exit 73
+fi
+if [[ "$install_start" == true ]] && /bin/launchctl print "gui/$(/usr/bin/id -u)/local.xerox3025.bridge" >/dev/null 2>&1; then
+  printf 'A bridge service is already registered. Nothing installed.\n' >&2; exit 73
+fi
+# Verify every payload file before copying or registering a service.
+(cd "$package_dir/payload" && /usr/bin/shasum -a 256 -c "$package_dir/payload.sha256")
+install_uuid="$(/usr/bin/plutil -extract printer_uuid raw -o - "$package_dir/payload/etc/device.plist")"
+[[ "$install_uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 65
+install_python=''
+if [[ -n "$install_review" ]]; then
+  (cd "$package_dir/maintenance" && /usr/bin/shasum -a 256 -c "$package_dir/maintenance.sha256")
+  install_python="$(/bin/bash "$package_dir/maintenance/select-python" "$install_python_option")"
+fi
+mkdir -p "$(dirname "$install_root")" "$(dirname "$install_plist")"
+mkdir "$install_root"
+install_ok=false
+install_has_association=false
+cleanup() {
+  install_status=$?
+  [[ "$install_ok" != true ]] || return 0
+  trap - EXIT
+  if [[ "$install_has_association" == true ]]; then
+    install_restore_args=(--restore "$install_root/association-review")
+    [[ "$install_start" == true ]] || install_restore_args+=(--staging)
+    if ! "$install_python" -I "$install_root/maintenance/association-maintenance.py" "${install_restore_args[@]}"; then
+      rm -f "$install_plist"
+      printf 'Installation stopped. Queue rollback needs review; runtime and private rollback files retained at %s\n' "$install_root" >&2
+      exit "$install_status"
+    fi
+  fi
+  rm -f "$install_plist"
+  rm -rf "$install_root"
+  exit "$install_status"
+}
+trap cleanup EXIT
+/usr/bin/ditto "$package_dir/payload" "$install_root/runtime"
+cp "$package_dir/uninstall" "$install_root/uninstall"
+mkdir "$install_root/state"
+printf 'local.xerox3025.bridge receipt v1\n' > "$install_root/receipt"
+# plutil handles spaces and XML escaping; no shell evaluation of path contents.
+/usr/bin/plutil -create xml1 "$install_plist"
+/usr/bin/plutil -insert Label -string local.xerox3025.bridge "$install_plist"
+/usr/bin/plutil -insert ProgramArguments -array "$install_plist"
+/usr/bin/plutil -insert ProgramArguments.0 -string "$install_root/runtime/bin/service-lock" "$install_plist"
+/usr/bin/plutil -insert ProgramArguments.1 -string "$install_root/state/instance.lock" "$install_plist"
+/usr/bin/plutil -insert ProgramArguments.2 -string "$install_root/runtime/bin/bridge-run" "$install_plist"
+/usr/bin/plutil -insert ProgramArguments.3 -string "$install_root/state" "$install_plist"
+/usr/bin/plutil -insert ProgramArguments.4 -string "$install_uuid" "$install_plist"
+/usr/bin/plutil -insert RunAtLoad -bool YES "$install_plist"
+/usr/bin/plutil -insert KeepAlive -bool YES "$install_plist"
+/usr/bin/plutil -insert ThrottleInterval -integer 15 "$install_plist"
+/usr/bin/plutil -insert ProcessType -string Background "$install_plist"
+/usr/bin/plutil -insert LimitLoadToSessionType -string Aqua "$install_plist"
+/usr/bin/plutil -insert Umask -integer 63 "$install_plist"
+/usr/bin/plutil -insert StandardOutPath -string /dev/null "$install_plist"
+/usr/bin/plutil -insert StandardErrorPath -string /dev/null "$install_plist"
+if [[ -n "$install_review" ]]; then
+  mkdir "$install_root/maintenance"
+  for install_helper in associate-queue.py association-maintenance.py select-python; do
+    cp "$package_dir/maintenance/$install_helper" "$install_root/maintenance/$install_helper"
+  done
+  (cd "$install_root/maintenance" && /usr/bin/shasum -a 256 associate-queue.py association-maintenance.py select-python > "$install_root/maintenance.sha256")
+  printf '%s\n' "$install_python" > "$install_root/association-python"
+  "$install_python" -I "$install_root/maintenance/association-maintenance.py" --stage "$install_review" --destination "$install_root/association-review" --printer-uuid "$install_uuid"
+  install_has_association=true
+  if [[ "$install_start" == true ]]; then
+    "$install_python" -I "$install_root/maintenance/association-maintenance.py" --apply "$install_root/association-review"
+  fi
+fi
+if [[ "$install_start" == true ]]; then
+  /bin/launchctl bootstrap "gui/$(/usr/bin/id -u)" "$install_plist"
+fi
+install_ok=true
+printf 'Installed %s\nAutostart enabled: %s\n' "$install_root" "$install_start"
