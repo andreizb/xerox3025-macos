@@ -12,6 +12,14 @@ export LD_LIBRARY_PATH="$bridge_root/lib/sane"
 unset SANE_DEBUG_XEROX_MFP SANE_DEBUG_DLL DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES
 bridge_child=''
 bridge_timer=''
+# A restart only helps when the scanner became reachable again. Conditions that
+# persist across restarts -- a held scan reservation, an unplugged printer --
+# would otherwise be retried every half minute for as long as they last, which
+# burns the printer's single scan session and rotates the logs that explain the
+# fault. Back off geometrically instead and reset once the endpoint answers.
+bridge_backoff_min=5
+bridge_backoff_max=300
+bridge_backoff=$bridge_backoff_min
 bridge_stop() {
   trap - TERM INT
   if [[ -n "$bridge_timer" ]]; then
@@ -33,17 +41,36 @@ bridge_stop() {
   fi
   exit 0
 }
+# One bounded line of service state. No identity, address or scanned content.
+bridge_note() {
+  printf '%s attempts=%s next_retry=%ss\n' "$1" "$2" "$3" > "$bridge_state/service.state" 2>/dev/null || true
+}
+bridge_wait() {
+  sleep "$1" & bridge_child=$!
+  wait "$bridge_child" || true
+  bridge_child=''
+}
 trap bridge_stop TERM INT
 printf 'xerox_mfp\n' > "$SANE_CONFIG_DIR/dll.conf"
+bridge_attempts=0
 while true; do
   if ! "$bridge_root/bin/discover" "$bridge_uuid" --sane > "$SANE_CONFIG_DIR/xerox_mfp.conf.next" 2>/dev/null; then
     rm -f "$SANE_CONFIG_DIR/xerox_mfp.conf.next"
-    sleep 15 & bridge_child=$!; wait "$bridge_child" || true; bridge_child=''
+    bridge_attempts=$((bridge_attempts+1))
+    bridge_note 'printer not found on the network' "$bridge_attempts" "$bridge_backoff"
+    bridge_wait "$bridge_backoff"
+    bridge_backoff=$((bridge_backoff*2))
+    (( bridge_backoff <= bridge_backoff_max )) || bridge_backoff=$bridge_backoff_max
     continue
   fi
   mv "$SANE_CONFIG_DIR/xerox_mfp.conf.next" "$SANE_CONFIG_DIR/xerox_mfp.conf"
   # Keep only two bounded process logs. No SANE debugging or image dumps.
-  [[ ! -f "$bridge_state/service.log" ]] || mv -f "$bridge_state/service.log" "$bridge_state/service.previous.log"
+  # A run that failed immediately is not allowed to rotate away the log of the
+  # run that still explains the fault.
+  bridge_started=$SECONDS
+  if [[ -f "$bridge_state/service.log" ]] && (( bridge_attempts == 0 )); then
+    mv -f "$bridge_state/service.log" "$bridge_state/service.previous.log"
+  fi
   "$bridge_root/bin/airsaned" --interface=lo0 --listen-port=18325 \
     --web-interface=false --debug=false --disclose-version=false \
     --options-file="$bridge_root/etc/options.conf" \
@@ -58,8 +85,12 @@ while true; do
     if (( bridge_ticks % 6 == 0 )); then
       # If the printer was asleep during SANE enumeration, retry discovery.
       # A present endpoint is never restarted merely because a scan is busy.
-      if ! /usr/bin/curl --noproxy '*' --fail --silent --max-time 3 \
+      if /usr/bin/curl --noproxy '*' --fail --silent --max-time 3 \
           http://127.0.0.1:18325/eSCL/ScannerCapabilities > /dev/null; then
+        bridge_attempts=0
+        bridge_backoff=$bridge_backoff_min
+        rm -f "$bridge_state/service.state"
+      else
         kill -TERM "$bridge_child" 2>/dev/null || true
       fi
       if [[ -f "$bridge_state/service.log" ]] && (( $(/usr/bin/stat -f %z "$bridge_state/service.log") > 1048576 )); then
@@ -70,5 +101,14 @@ while true; do
   done
   wait "$bridge_child" || true
   bridge_child=''
-  sleep 5 & bridge_child=$!; wait "$bridge_child" || true; bridge_child=''
+  # A session that served the endpoint for a while is a fresh fault, not a loop.
+  if (( SECONDS - bridge_started >= 300 )); then
+    bridge_attempts=0
+    bridge_backoff=$bridge_backoff_min
+  fi
+  bridge_attempts=$((bridge_attempts+1))
+  bridge_note 'scanner endpoint unavailable' "$bridge_attempts" "$bridge_backoff"
+  bridge_wait "$bridge_backoff"
+  bridge_backoff=$((bridge_backoff*2))
+  (( bridge_backoff <= bridge_backoff_max )) || bridge_backoff=$bridge_backoff_max
 done

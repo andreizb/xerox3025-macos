@@ -3,21 +3,82 @@
 # Metadata-only diagnostic report. Never reads scanned documents or service logs.
 set -eu
 diag_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+diag_state="$(cd "$diag_root/.." && pwd -P)/state"
+# Overridable only so the offline test can exercise both branches without a
+# printer or a running service. Production uses the default.
+diag_endpoint="${XEROX3025_DIAG_ENDPOINT:-http://127.0.0.1:18325/eSCL/ScannerCapabilities}"
 printf 'Xerox3025Bridge diagnostic metadata\n'
 /usr/bin/sw_vers
 /usr/bin/uname -m
 for diag_file in "$diag_root"/bin/airsaned "$diag_root"/bin/discover "$diag_root"/bin/scanimage "$diag_root"/bin/service-lock "$diag_root"/lib/*.dylib "$diag_root"/lib/sane/*.so; do
   printf '%s: ' "${diag_file##*/}"
-  /usr/bin/lipo -archs "$diag_file"
+  # lipo lives in the active developer directory. An unaccepted Xcode licence
+  # or a missing command line tools selection makes it exit non-zero, which
+  # must not abort the rest of the report.
+  /usr/bin/lipo -archs "$diag_file" 2>/dev/null || printf 'architecture unavailable\n'
 done
+# The bundled backend is loaded from this runtime through SANE_CONFIG_DIR and
+# LD_LIBRARY_PATH. SANE's dll loader also appends the prefix that was compiled
+# into libsane at build time; that directory belongs to the build checkout, is
+# searched second and is expected to be absent on an installed system. A
+# "couldn't find backend" line naming it is not a fault.
+if [[ -f "$diag_root/lib/sane/libsane-xerox_mfp.1.so" ]]; then
+  printf 'sane backend: present in bundled runtime (compiled-in fallback path is unused)\n'
+else
+  printf 'sane backend: MISSING from bundled runtime\n'
+fi
 if /bin/launchctl print "gui/$(/usr/bin/id -u)/local.xerox3025.bridge" >/dev/null 2>&1; then
   printf 'autostart: registered\n'
 else
   printf 'autostart: not registered\n'
 fi
-if /usr/bin/curl --noproxy '*' --silent --fail --max-time 5 http://127.0.0.1:18325/eSCL/ScannerCapabilities >/dev/null; then
+if [[ -f "$diag_state/service.state" ]]; then
+  printf 'service state: '; /usr/bin/head -c 200 "$diag_state/service.state"; printf '\n'
+fi
+if /usr/bin/curl --noproxy '*' --silent --fail --max-time 5 "$diag_endpoint" >/dev/null; then
   printf 'local scanner endpoint: responds\n'
+  printf 'scan path: healthy; device not probed\n'
 else
   printf 'local scanner endpoint: unavailable\n'
+  # The device permits a single scan session. Probing it while the endpoint is
+  # serving would interrupt an acquisition in progress, so this only runs once
+  # the endpoint is already known to be unavailable.
+  diag_log="$(/usr/bin/mktemp -t xerox3025diag)" || diag_log=''
+  if [[ -n "$diag_log" ]]; then
+    (
+      SANE_CONFIG_DIR="$diag_state/sane.d" LD_LIBRARY_PATH="$diag_root/lib/sane" \
+        SANE_DEBUG_XEROX_MFP=5 "$diag_root/bin/scanimage" -L
+    ) >"$diag_log" 2>&1 &
+    diag_pid=$!
+    diag_waited=0
+    while kill -0 "$diag_pid" 2>/dev/null; do
+      if (( diag_waited >= 60 )); then kill -KILL "$diag_pid" 2>/dev/null || true; break; fi
+      /bin/sleep 1; diag_waited=$((diag_waited+1))
+    done
+    wait "$diag_pid" 2>/dev/null || true
+    # Only the decoded protocol state is reported. The device name, hostname
+    # and address present in this output are never printed.
+    if /usr/bin/grep -q 'multi-function peripheral' "$diag_log" 2>/dev/null; then
+      printf 'device scan unit: responding (fault is local to the bridge)\n'
+    else
+      diag_dump="$(/usr/bin/grep -o -E '\[[0-9]+\]( [0-9a-f][0-9a-f])+' "$diag_log" 2>/dev/null | /usr/bin/head -1 || true)"
+      if [[ -n "$diag_dump" ]]; then
+        # Reply layout: a8, status, payload length, message.
+        set -- ${diag_dump#*]}
+        case "${2:-}" in
+          00) printf 'device scan unit: replied GOOD but enumeration failed\n' ;;
+          02) printf 'device scan unit: CHECK condition\n' ;;
+          04) printf 'device scan unit: CANCEL state\n' ;;
+          08) printf 'device scan unit: BUSY -- a scan reservation is held.\n'
+              printf '  Nothing on this Mac can release it. Switch the printer off,\n'
+              printf '  disconnect it from mains power for 30 seconds, then power it on.\n' ;;
+          *)  printf 'device scan unit: unrecognised status %s\n' "${2:-none}" ;;
+        esac
+      else
+        printf 'device scan unit: no protocol reply (printer unreachable, powered off or not listening)\n'
+      fi
+    fi
+    rm -f "$diag_log"
+  fi
 fi
 printf 'Device identity, IP addresses, filenames, logs and scanned content omitted.\n'

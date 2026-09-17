@@ -123,6 +123,7 @@ tests/busy_test.sh
 tests/crop_test.cpp
 tests/final_band_test.c
 tests/tcp_io_test.c
+tests/test_diagnostics.py
 tests/test_queue_association.py
 tests/test_source_archive.py
 tests/worker_test.cpp
