@@ -77,10 +77,29 @@ cmake('jpeg-3.2.0',archive('libjpeg-turbo','https://github.com/libjpeg-turbo/lib
 cmake('png-1.6.58',archive('libpng','https://download.sourceforge.net/libpng/libpng-1.6.58.tar.xz','libpng-1.6.58'),('-DPNG_STATIC=OFF','-DPNG_TESTS=OFF','-DPNG_TOOLS=OFF','-DZLIB_INCLUDE_DIR='+subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()+'/usr/include','-DZLIB_LIBRARY='+subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()+'/usr/lib/libz.tbd'))
 sane=checkout('sane-backends',['sane-tcp-framing-and-source.patch'])
 shutil.copy2(ROOT/'src/xerox_tcp_io.h',sane/'backend/xerox_tcp_io.h')
+def autoreconf(source):
+ # A self-bootstrapped m4 is preferred, but m4 compiled against the macOS 26
+ # SDK dies inside aclocal. Fall back to any other m4 that can finish the job
+ # rather than leaving the tree without a configure script.
+ try:
+  run(['autoreconf','-fi'],source); return
+ except subprocess.CalledProcessError:
+  pass
+ # Homebrew keeps m4 keg-only, so its opt path is checked before any
+ # /usr/bin/m4, which is far too old for this autoconf.
+ for candidate in ('/opt/homebrew/opt/m4/bin/m4','/usr/local/opt/m4/bin/m4',
+                   '/opt/homebrew/bin/m4','/opt/homebrew/bin/gm4',
+                   '/usr/local/bin/m4','/usr/local/bin/gm4','/usr/bin/gm4','/usr/bin/m4'):
+  if not os.access(candidate,os.X_OK) or os.path.realpath(candidate)==os.path.realpath(TOOLS/'bin/m4'):continue
+  fallback=dict(env,M4=candidate)
+  print('! bootstrapped m4 failed under aclocal; retrying with',candidate,flush=True)
+  if subprocess.run(['autoreconf','-fi'],cwd=source,env=fallback).returncode==0:return
+ raise RuntimeError('No usable m4: the bootstrapped one and every system m4 failed to run aclocal. Install a recent one (brew install m4) and rerun.')
+
 if not (sane/'configure').exists():
  (sane/'.tarball-version').write_text('1.4.0.923a04e\n')
- run(['autoreconf','-fi'],sane)
-auto('sane',sane,PREFIX,('--disable-nls','--disable-static','--without-avahi','--without-snmp','--without-systemd','--without-libcurl','--without-poppler-glib','--without-usb-record-replay','--without-v4l','--with-usb','--without-libtiff','--disable-locking','--enable-pthread', 'BACKENDS=xerox_mfp','ac_cv_lib_tiff_TIFFOpen=no'))
+ autoreconf(sane)
+auto('sane',sane,PREFIX,('--disable-nls','--disable-static','--without-avahi','--without-snmp','--without-systemd','--without-libcurl','--without-poppler-glib','--without-usb-record-replay','--without-v4l','--without-usb','--without-libtiff','--disable-locking','--enable-pthread', 'BACKENDS=xerox_mfp','ac_cv_lib_tiff_TIFFOpen=no'))
 # Always rebuild our small backend after patch/header changes, including a
 # previous stock-backend comparison. Build stamps apply only to dependencies.
 run(['make','-j6'],BUILD/'sane/backend')
