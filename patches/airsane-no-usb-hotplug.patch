@@ -1,0 +1,102 @@
+diff --git a/zeroconf/hotplugnotifier.cpp b/zeroconf/hotplugnotifier.cpp
+index c31fa1e..aec1c1f 100644
+--- a/zeroconf/hotplugnotifier.cpp
++++ b/zeroconf/hotplugnotifier.cpp
+@@ -19,84 +19,22 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ #include "hotplugnotifier.h"
+ 
+ #include <atomic>
+-#include <csignal>
+-#ifdef __FreeBSD__
+-#include <libusb.h>
+-#else
+-#include <libusb-1.0/libusb.h>
+-#endif
+-#include <pthread.h>
+-#include <thread>
+ 
++/*
++ * USB hotplug notification is disabled in this build.
++ *
++ * The scanner is reached over the network and the SANE backend is configured
++ * --without-usb, so no USB device can ever reach this daemon. libusb still had
++ * to initialise for the notifier alone, and on macOS 26 its darwin backend
++ * leaves a null method table, so libusb_init_context dereferences null and the
++ * daemon dies before it serves anything. Network changes, which are the events
++ * that actually matter here, are still delivered by NetworkHotplugNotifier.
++ *
++ * The class and its interface are unchanged so callers need no edit.
++ */
+ struct HotplugNotifier::Private
+ {
+-  libusb_context* mpContext;
+-  std::thread mThread;
+-  ::libusb_hotplug_callback_handle mCbHandle;
+-  std::atomic<bool> mTerminate;
+-
+-  Private(HotplugNotifier* pNotifier)
+-    : mpContext(nullptr)
+-    , mCbHandle(0)
+-    , mTerminate(false)
+-  {
+-    ::libusb_init(&mpContext);
+-    int events =
+-      LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT;
+-    ::libusb_hotplug_register_callback(mpContext,
+-                                       libusb_hotplug_event(events),
+-                                       LIBUSB_HOTPLUG_NO_FLAGS,
+-                                       LIBUSB_HOTPLUG_MATCH_ANY,
+-                                       LIBUSB_HOTPLUG_MATCH_ANY,
+-                                       LIBUSB_HOTPLUG_MATCH_ANY,
+-                                       &Private::hotplugCallback,
+-                                       pNotifier,
+-                                       &mCbHandle);
+-    mThread = std::thread([this]() { hotplugThread(); });
+-  }
+-
+-  ~Private()
+-  {
+-    mTerminate = true;
+-    if (mCbHandle)
+-      ::libusb_hotplug_deregister_callback(mpContext, mCbHandle);
+-    mThread.join();
+-    ::libusb_exit(mpContext);
+-  }
+-
+-  void hotplugThread()
+-  {
+-    int err = 0;
+-    while (err == 0) {
+-      if (mTerminate)
+-        return;
+-      err = ::libusb_handle_events(mpContext);
+-      switch (err) {
+-        case LIBUSB_ERROR_INTERRUPTED:
+-        case LIBUSB_ERROR_TIMEOUT:
+-          err = 0;
+-          break;
+-      }
+-    }
+-  }
+-
+-  static int hotplugCallback(libusb_context*,
+-                             libusb_device*,
+-                             libusb_hotplug_event libusbevent,
+-                             void* p)
+-  {
+-    Event event = other;
+-    switch (libusbevent) {
+-      case LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED:
+-        event = deviceArrived;
+-        break;
+-      case LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT:
+-        event = deviceLeft;
+-        break;
+-    }
+-    static_cast<HotplugNotifier*>(p)->onHotplugEvent(event);
+-    return 0;
+-  }
++  explicit Private(HotplugNotifier*) {}
+ };
+ 
+ HotplugNotifier::HotplugNotifier()

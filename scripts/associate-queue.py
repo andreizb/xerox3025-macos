@@ -147,6 +147,43 @@ def derive_ppd(original, generated, toner=False):
     return b"".join(output), hardware
 
 
+def ppd_raw_line(data, key):
+    text = data.decode("latin-1")
+    found = re.findall(r"^\*" + re.escape(key) + r":[^\r\n]*", text, re.M)
+    require(len(found) <= 1, f"Duplicate field: {key}")
+    return found[0] if found else None
+
+
+def subtract_association(current, original, keys):
+    """Undo this tool's association inside the live PPD.
+
+    Overwriting the queue with the snapshot taken at review time also reverts
+    whatever macOS changed afterwards, and an OS update that regenerates the
+    PPD would otherwise block rollback forever. Restore the reviewed fields to
+    their original lines -- dropping those the original never carried -- and
+    preserve every other byte exactly as it is now.
+    """
+    restore_to = {key: ppd_raw_line(original, key) for key in keys}
+    newline = b"\r\n" if b"\r\n" in current else b"\n"
+    output, used = [], set()
+    for line in current.splitlines(keepends=True):
+        match = re.match(rb"^\*([A-Za-z0-9]+):", line)
+        key = match.group(1).decode() if match else None
+        if key in keys:
+            if restore_to.get(key) is not None and key not in used:
+                output.append(restore_to[key].encode("latin-1") + newline)
+                used.add(key)
+            continue
+        output.append(line)
+    if output and not output[-1].endswith((b"\r", b"\n")):
+        output[-1] += newline
+    for key in keys:
+        if restore_to.get(key) is not None and key not in used:
+            output.append(restore_to[key].encode("latin-1") + newline)
+            used.add(key)
+    return b"".join(output)
+
+
 def validate_system_tools(toner):
     bundle = Path(AIRSCAN)
     require(bundle.is_dir() and str(bundle.resolve()) == AIRSCAN,
@@ -230,10 +267,19 @@ def guard(current_ppd, expected_hash, current, expected):
     require(current.get("printer_state") != 4, "Printer is processing a job; try again when idle.")
 
 
-def guard_restore(current_ppd, expected_hash, current, expected):
-    require(sha(current_ppd) == expected_hash,
-            "Queue PPD changed after association. Refusing to overwrite later edits.")
-    identity = ("printer-name", "printer-uuid", "device-uri")
+def guard_restore(current_ppd, candidate_ppd, keys, current, expected):
+    # macOS rewrites this PPD on OS updates, so a whole-file hash stops
+    # matching through no fault of the association. What must still hold is
+    # that the reviewed fields are exactly the ones this tool wrote; then
+    # removing them is safe and every unrelated later edit survives.
+    for key in keys:
+        require(ppd_values(current_ppd, key) == ppd_values(candidate_ppd, key),
+                f"Field {key} was changed after association. Refusing to restore.")
+    # printer-uuid is CUPS's own object id and is reissued whenever macOS
+    # recreates the queue, which an OS update does on its own. The stable
+    # identity is the queue name together with the Bonjour device-uri, and that
+    # uri carries the hardware UUID this association was checked against.
+    identity = ("printer-name", "device-uri")
     require(all(current["settings"].get(key) == expected["settings"].get(key)
                 for key in identity),
             "Queue identity changed after association. Refusing to restore another queue.")
@@ -314,28 +360,43 @@ def load_plan(directory):
 def mutate(directory, restore=False):
     directory, manifest, original, candidate = load_plan(directory)
     queue = manifest["queue"]
+    keys = SCANNER_KEYS + (("APPrinterLowInkTool",) if manifest["toner_hook"] else ())
+    current_ppd = read_regular(queue_ppd(queue))
     if restore:
         require(manifest["status"] in ("applied", "needs-review"),
                 "There is no recorded applied change to restore.")
         expected = manifest.get("after")
         require(expected is not None, "Post-apply settings were not captured; manual review is required.")
-        expected_hash, target = manifest["candidate_sha256"], original
+        expected_hash, target = None, subtract_association(current_ppd, original, keys)
     else:
         require(manifest["status"] == "reviewed" and not manifest.get("pending_operation"),
                 "This review was already applied, restored, or has an uncertain pending operation.")
         expected, expected_hash, target = manifest["before"], manifest["original_sha256"], candidate
         validate_system_tools(manifest["toner_hook"])
     current = queue_snapshot(queue)
-    (guard_restore if restore else guard)(read_regular(queue_ppd(queue)), expected_hash, current, expected)
+    if restore:
+        guard_restore(current_ppd, candidate, keys, current, expected)
+    else:
+        guard(current_ppd, expected_hash, current, expected)
     # No active or queued jobs may be present at the checked instant.
     jobs = run(["/usr/bin/lpstat", "-h", LOCAL_CUPS, "-o", queue]).strip()
     require(not jobs, "The queue has unfinished jobs; try again after they finish.")
-    filename = "original.ppd" if restore else "candidate.ppd"
+    filename = "rollback.ppd" if restore else "candidate.ppd"
+    if restore:
+        # The rollback is derived from the live queue, so it is written out for
+        # inspection and retained with the rest of the review.
+        rollback_path = directory / filename
+        if rollback_path.exists():
+            rollback_path.unlink()
+        private_write(rollback_path, target)
     # Validate immediately before the sole mutating command. No -v, -d, -E or -x.
     run(["/usr/bin/cupstestppd", directory / filename])
     # Restore accepts preferences changed since installation, then requires
     # that exact current state to remain stable across this one operation.
-    guard(read_regular(queue_ppd(queue)), expected_hash, queue_snapshot(queue), current)
+    require(sha(read_regular(queue_ppd(queue))) == sha(current_ppd),
+            "Queue PPD changed while preparing this operation; nothing was written.")
+    require(stable_snapshot(queue_snapshot(queue)) == stable_snapshot(current),
+            "Queue identity, defaults or user options changed; nothing was written.")
     manifest["pending_operation"] = "restore" if restore else "apply"
     manifest["last_attempt_at_utc"] = now()
     write_manifest(directory, manifest)

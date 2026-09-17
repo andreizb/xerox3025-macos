@@ -104,7 +104,7 @@ auto('sane',sane,PREFIX,('--disable-nls','--disable-static','--without-avahi','-
 # previous stock-backend comparison. Build stamps apply only to dependencies.
 run(['make','-j6'],BUILD/'sane/backend')
 run(['make','install'],BUILD/'sane/backend')
-airsane=checkout('AirSane',['airsane-isolated-macos-build.patch','airsane-identity-localonly.patch'])
+airsane=checkout('AirSane',['airsane-isolated-macos-build.patch','airsane-identity-localonly.patch','airsane-no-usb-hotplug.patch'])
 # The Autotools rpath in LDFLAGS is already handled by AirSane's CMake target.
 # Importing it into CMake's linker flags makes install_name_tool add it twice.
 run(['cmake','-S',airsane,'-B',BUILD/'airsane','-DISOLATED_PREFIX='+str(PREFIX),'-DCMAKE_INSTALL_PREFIX='+str(PREFIX),'-DCMAKE_OSX_ARCHITECTURES=arm64','-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0','-DCMAKE_BUILD_TYPE=Release','-DCMAKE_EXE_LINKER_FLAGS='],ROOT)

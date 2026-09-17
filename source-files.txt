@@ -101,6 +101,7 @@ packaging/uninstall
 packaging/uninstall-all
 patches/airsane-identity-localonly.patch
 patches/airsane-isolated-macos-build.patch
+patches/airsane-no-usb-hotplug.patch
 patches/sane-tcp-framing-and-source.patch
 scripts/accept-cancel.py
 scripts/accept-escl.py
