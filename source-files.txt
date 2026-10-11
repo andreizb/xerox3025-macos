@@ -7,6 +7,7 @@ THIRD_PARTY_NOTICES.md
 capabilities.json
 docs/BUILD.md
 docs/FIRMWARE.md
+docs/PUBLIC_READINESS.md
 docs/QUEUE_ASSOCIATION.md
 docs/REPOSITORY_CHECKS.md
 docs/SPLIX.md

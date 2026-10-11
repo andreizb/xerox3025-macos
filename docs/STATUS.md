@@ -1,8 +1,9 @@
 # Acceptance status and remaining work
 
 This is a sanitized summary of local acceptance recorded on 9 September 2026.
-Private source evidence and original generated releases remain outside this
-repository. It is not a claim that every clone or macOS version was tested.
+Private evidence is excluded from Git. A compact local archive retains the
+original specification and technical records; old generated releases are disposable.
+It is not a claim that every clone or macOS version was tested.
 The repository preparation on 13 September did not reinstall anything or run
 new physical scans or prints.
 
@@ -38,9 +39,12 @@ new physical scans or prints.
   coverage. Visible PDF/Finder menu use and physical booklet/refeed calibration
   still need a person. Structural empty-page removal deliberately keeps scanned
   white pages and faint marks; general raster blank detection is not implemented.
-- USB attachment/acquisition, actual DHCP address change, logout/login, fresh-user
-  installation, 1200 dpi scanning, NI hardware and broader macOS compatibility are
-  unqualified. A deployment target is not a compatibility test.
+- USB acquisition is explicitly disabled in this build: SANE uses `--without-usb`
+  and AirSane USB hotplug is disabled. Network scanning remains enabled. Bundling
+  libusb for the existing build/link layout does not enable USB scanning.
+- Actual DHCP address change, logout/login, fresh-user installation, 1200 dpi
+  scanning, NI hardware and broader macOS compatibility remain unqualified.
+  A deployment target is not a compatibility test.
 - Advanced background cleanup, automatic card detection, poster tiling, generalized
   watermark/overlay editing and naming templates are not added to scanner controls.
   The isolated Apple-action experiments are not installed product features.
@@ -50,3 +54,11 @@ new physical scans or prints.
 Overall specification acceptance remains incomplete. This repository preserves
 working implementation and experiments without treating offline tests as physical
 or visible-UI acceptance.
+
+## Fresh source verification
+
+The 11 October 2026 audit rebuilt both core components from public upstream
+sources and the tracked local patches, generated native packages, and checked
+staged installation/removal without touching a real queue. See
+[PUBLIC_READINESS.md](PUBLIC_READINESS.md). These checks do not replace the
+remaining physical and native-UI acceptance above.

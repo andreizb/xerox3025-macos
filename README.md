@@ -26,7 +26,8 @@ route opens Image Capture. Controls differ between Apple applications.
 qualified or notarized driver release.** Historical hardware acceptance was on
 macOS 26.6.2, Apple Silicon, a BI flatbed and Wi-Fi. See [status and limits](docs/STATUS.md).
 No future macOS compatibility is promised; no ADF, fax or automatic duplex is
-advertised for BI hardware. USB and 1200 dpi scanning remain unqualified.
+advertised for BI hardware. This build supports network scanning only: USB
+scanning and USB hotplug are disabled. 1200 dpi scanning remains unqualified.
 
 ## Build and install
 
@@ -45,8 +46,25 @@ The optional toner proxy changes only the existing queue's device URI to a local
 service at port 18326. Printing then depends on that service. Its uninstaller
 restores the original direct connection before stopping it. Install scanner
 first, toner second; remove toner first. Source checkout deletion is not an
-uninstaller. The installed `uninstall-all` removes both components while preserving
-the printer queue and user documents.
+uninstaller. Run `./uninstall-all` from the generated scanner package, or
+`bash packaging/uninstall-all` from this checkout, to remove both components in
+the correct order while preserving the printer queue and user documents. The
+combined helper is not copied into the installed runtime; each component keeps
+its own uninstaller under `~/Library/Application Support/`.
+
+## Independent use and publication
+
+The scanner and toner packages were built from a fresh source export and passed
+isolated install/uninstall checks on 11 October 2026. All 11 packaged runtime
+binaries were ARM64. See [the verification record](docs/PUBLIC_READINESS.md).
+Another Mac still needs the listed build tools, its own printer identity, local
+network permission where requested, and native queue-association verification.
+There is no preconfigured, notarized download or universal hardware guarantee.
+
+Only tracked source belongs on GitHub. Ignored `private/`, `evidence/`, device
+configuration and generated packages may contain personal information; do not
+upload a ZIP of an entire working directory. The old development workspace is
+not a build or runtime dependency.
 
 ## Development
 

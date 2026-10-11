@@ -36,5 +36,7 @@
   "future_macos_compatibility": "unknown",
   "optional_document_ui_acceptance": false,
   "physical_margin_calibration": false,
-  "details": "docs/STATUS.md"
+  "details": "docs/STATUS.md",
+  "usb_enabled": false,
+  "usb_disabled_reason": "Network-only build: SANE --without-usb and AirSane USB hotplug disabled"
 }
